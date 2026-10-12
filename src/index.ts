@@ -460,34 +460,15 @@ async function resolvePanelBase(ctx: Context, body: Record<string, unknown>, rep
 async function handlePanelSave(ctx: Context, request: IncomingMessage, response: ServerResponse): Promise<void> {
   const reply = panelReply(response)
   try {
-    const chunks: Buffer[] = []
-    let size = 0
-    for await (const chunk of request) {
-      size += (chunk as Buffer).length
-      if (size > 1_000_000) { reply(413, { ok: false, error: 'body too large' }); return }
-      chunks.push(chunk as Buffer)
-    }
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { scope?: unknown, workspace?: unknown, title?: unknown, content?: unknown, tags?: unknown, path?: unknown }
+    const body = await readPanelBody(request, 1000000, reply)
+    if (body === undefined) return
     const title = safeSlice(String(body.title ?? '').trim(), 60)
     const content = safeSlice(String(body.content ?? '').trim(), MAX_CONTENT_CHARS)
     const tags = (Array.isArray(body.tags) ? body.tags : []).filter((t): t is string => typeof t === 'string').slice(0, 10)
     if (title === '' || content === '') { reply(400, { ok: false, error: 'title and content must be non-empty' }); return }
-    let base: string | undefined
-    if (body.scope === 'user') {
-      base = scopeDir('user')
-    } else if (body.scope === 'project') {
-      if (body.workspace !== undefined) {
-        const root = path.resolve(String(body.workspace))
-        if (!(await knownWorkspaces(ctx)).includes(root)) { reply(400, { ok: false, error: 'unknown workspace' }); return }
-        base = path.join(root, '.dsh', 'memory')
-      } else {
-        base = PROJECT_DIR
-      }
-    } else {
-      reply(400, { ok: false, error: 'scope must be "user" or "project"' }); return
-    }
-    if (base === undefined) { reply(400, { ok: false, error: 'target scope unavailable' }); return }
-    const r = await saveMemoryCore({ scope: body.scope, base, title, content, tags, sessionCwd: '', memPathArg: typeof body.path === 'string' ? body.path : undefined }) // C1: panel saves are root-level unless an explicit path tag is given — never fall back to the process cwd
+    const base = await resolvePanelBase(ctx, body, reply)
+    if (base === undefined) return
+    const r = await saveMemoryCore({ scope: body.scope as 'user' | 'project', base, title, content, tags, sessionCwd: '', memPathArg: typeof body.path === 'string' ? body.path : undefined }) // C1: panel saves are root-level unless an explicit path tag is given — never fall back to the process cwd
     if (!r.ok) { reply(500, { ok: false, error: r.error }); return }
     reply(200, r)
   } catch (e) {
@@ -504,29 +485,12 @@ async function handlePanelSave(ctx: Context, request: IncomingMessage, response:
 async function handlePanelDelete(ctx: Context, request: IncomingMessage, response: ServerResponse): Promise<void> {
   const reply = panelReply(response)
   try {
-    const chunks: Buffer[] = []
-    for await (const chunk of request) {
-      chunks.push(chunk as Buffer)
-      if (chunks.reduce((n, c) => n + c.length, 0) > 10_000) { reply(413, { ok: false, error: 'body too large' }); return }
-    }
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { scope?: unknown, workspace?: unknown, id?: unknown }
-    const id = String(body.id ?? '').replace(/\.md$/, '')
-    if (!/^[a-zA-Z0-9\u4e00-\u9fff_-]+$/.test(id)) { reply(400, { ok: false, error: 'invalid id' }); return }
-    let base: string | undefined
-    if (body.scope === 'user') {
-      base = scopeDir('user')
-    } else if (body.scope === 'project') {
-      if (body.workspace !== undefined) {
-        const root = path.resolve(String(body.workspace))
-        if (!(await knownWorkspaces(ctx)).includes(root)) { reply(400, { ok: false, error: 'unknown workspace' }); return }
-        base = path.join(root, '.dsh', 'memory')
-      } else {
-        base = PROJECT_DIR
-      }
-    } else {
-      reply(400, { ok: false, error: 'scope must be "user" or "project"' }); return
-    }
-    if (base === undefined) { reply(400, { ok: false, error: 'target scope unavailable' }); return }
+    const body = await readPanelBody(request, 10000, reply)
+    if (body === undefined) return
+    const id = panelIdOf(body, reply)
+    if (id === undefined) return
+    const base = await resolvePanelBase(ctx, body, reply)
+    if (base === undefined) return
     const file = path.join(memoryDirOf(base), `${id}.md`)
     if (!existsSync(file)) { reply(404, { ok: false, error: 'memory not found' }); return }
     await fs.rm(file, { force: true })
@@ -546,35 +510,18 @@ async function handlePanelDelete(ctx: Context, request: IncomingMessage, respons
 async function handlePanelUpdate(ctx: Context, request: IncomingMessage, response: ServerResponse): Promise<void> {
   const reply = panelReply(response)
   try {
-    const chunks: Buffer[] = []
-    for await (const chunk of request) {
-      chunks.push(chunk as Buffer)
-      if (chunks.reduce((n, c) => n + c.length, 0) > 1_000_000) { reply(413, { ok: false, error: 'body too large' }); return }
-    }
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { scope?: unknown, workspace?: unknown, id?: unknown, title?: unknown, content?: unknown, tags?: unknown, path?: unknown }
-    const rawId = String(body.id ?? '').replace(/\.md$/, '')
-    if (!/^[a-zA-Z0-9\u4e00-\u9fff_-]+$/.test(rawId)) { reply(400, { ok: false, error: 'invalid id' }); return }
+    const body = await readPanelBody(request, 1000000, reply)
+    if (body === undefined) return
+    const rawId = panelIdOf(body, reply)
+    if (rawId === undefined) return
     const title = body.title === undefined ? undefined : safeSlice(String(body.title).trim(), 60)
     const content = body.content === undefined ? undefined : safeSlice(String(body.content).trim(), MAX_CONTENT_CHARS)
     const tags = Array.isArray(body.tags) ? body.tags.filter((t): t is string => typeof t === 'string').slice(0, 10) : undefined
     if (title === '') { reply(400, { ok: false, error: 'title must be non-empty' }); return }
     if (content === '') { reply(400, { ok: false, error: 'content must be non-empty' }); return }
     const pathArg = typeof body.path === 'string' ? body.path.trim().replace(/[^a-zA-Z0-9\u4e00-\u9fff/_-]+/g, '-').replace(/^-+|-+$/g, '') : undefined
-    let base: string | undefined
-    if (body.scope === 'user') {
-      base = scopeDir('user')
-    } else if (body.scope === 'project') {
-      if (body.workspace !== undefined) {
-        const root = path.resolve(String(body.workspace))
-        if (!(await knownWorkspaces(ctx)).includes(root)) { reply(400, { ok: false, error: 'unknown workspace' }); return }
-        base = path.join(root, '.dsh', 'memory')
-      } else {
-        base = PROJECT_DIR
-      }
-    } else {
-      reply(400, { ok: false, error: 'scope must be "user" or "project"' }); return
-    }
-    if (base === undefined) { reply(400, { ok: false, error: 'target scope unavailable' }); return }
+    const base = await resolvePanelBase(ctx, body, reply)
+    if (base === undefined) return
     const file = path.join(memoryDirOf(base), `${rawId}.md`)
     if (!existsSync(file)) { reply(404, { ok: false, error: 'memory not found' }); return }
     const text = (await fs.readFile(file, 'utf8')).replace(/\r\n/g, '\n') // C9: hand-edited CRLF files stay editable
@@ -670,29 +617,12 @@ function findNestedScopes(root: string, maxDepth = 3): string[] {
 async function handlePanelRead(ctx: Context, request: IncomingMessage, response: ServerResponse): Promise<void> {
   const reply = panelReply(response)
   try {
-    const chunks: Buffer[] = []
-    for await (const chunk of request) {
-      chunks.push(chunk as Buffer)
-      if (chunks.reduce((n, c) => n + c.length, 0) > 10_000) { reply(413, { ok: false, error: 'body too large' }); return }
-    }
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { scope?: unknown, workspace?: unknown, id?: unknown }
-    const id = String(body.id ?? '').replace(/\.md$/, '')
-    if (!/^[a-zA-Z0-9\u4e00-\u9fff_-]+$/.test(id)) { reply(400, { ok: false, error: 'invalid id' }); return }
-    let base: string | undefined
-    if (body.scope === 'user') {
-      base = scopeDir('user')
-    } else if (body.scope === 'project') {
-      if (body.workspace !== undefined) {
-        const root = path.resolve(String(body.workspace))
-        if (!(await knownWorkspaces(ctx)).includes(root)) { reply(400, { ok: false, error: 'unknown workspace' }); return }
-        base = path.join(root, '.dsh', 'memory')
-      } else {
-        base = PROJECT_DIR
-      }
-    } else {
-      reply(400, { ok: false, error: 'scope must be "user" or "project"' }); return
-    }
-    if (base === undefined) { reply(400, { ok: false, error: 'target scope unavailable' }); return }
+    const body = await readPanelBody(request, 10000, reply)
+    if (body === undefined) return
+    const id = panelIdOf(body, reply)
+    if (id === undefined) return
+    const base = await resolvePanelBase(ctx, body, reply)
+    if (base === undefined) return
     const file = path.join(memoryDirOf(base), `${id}.md`)
     if (!existsSync(file)) { reply(404, { ok: false, error: 'memory not found' }); return }
     const text = (await fs.readFile(file, 'utf8')).replace(/\r\n/g, '\n') // C9: hand-edited CRLF files stay editable
