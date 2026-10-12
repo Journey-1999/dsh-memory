@@ -2,7 +2,7 @@
 
 ![npm](https://img.shields.io/npm/v/@fooxe/dsh-memory) ![license](https://img.shields.io/badge/license-MIT-blue) ![node](https://img.shields.io/badge/node-%3E%3D22.19-green)
 
-**English** | [**中文**](docs/README.zh.md)
+**English** | [**中文**](https://github.com/annkun/dsh-memory/blob/main/docs/README.zh.md)
 
 **Persistent memory for DeepSeek Harness — the Claude Code memory model: your agents remember across sessions, wake up with context, and never mix projects. Pure files, zero dependencies.**
 
