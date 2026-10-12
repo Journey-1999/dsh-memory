@@ -139,7 +139,7 @@ test('P1 数据桥：GET /dsh-memory/api/v1/list 返回双域 JSON', async () =>
   let body = ''
   const res = { writeHead: () => {}, end: s => { body = s } }
   route.handler({}, res)
-  await new Promise(resolve => setImmediate(resolve)) // GET handler resolves async
+  for (let i = 0; i < 50 && body === ''; i++) await new Promise(resolve => setTimeout(resolve, 10)) // C12: real async IO in the walk needs real time, not just ticks
   const data = JSON.parse(body)
   assert.ok(data.scopes && typeof data.scopes.user === 'object', '应有 user 域')
   assert.ok(Array.isArray(data.scopes.projects), 'P2: projects 应为工作区数组')
