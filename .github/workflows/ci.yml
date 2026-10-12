@@ -17,6 +17,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: npm install
+      - run: npm install --no-audit --no-fund --legacy-peer-deps
       - run: npm run build
       - run: npm test
