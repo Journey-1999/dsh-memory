@@ -117,7 +117,7 @@ test('v0.7 两段式提示：其他区域记忆不注入但明示可搜', async 
     { title: 'API gateway port', content: 'backend 网关固定用 8080 端口，勿改。', path: 'backend' }, exec)
   const text = sections[0].text({})
   assert.ok(!text.includes('API gateway port'), '其他区域的记忆不应注入')
-  assert.ok(text.includes('+1 more tagged to other areas'), '应提示还有其他区域记忆可搜')
+  assert.ok(text.includes("+1 more tagged to areas you haven't touched"), '应提示还有未触碰区域记忆可搜')
 })
 
 test('v0.7 工作目录进入子目录后该区域记忆注入', async () => {

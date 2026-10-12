@@ -901,6 +901,148 @@ function projectBaseFor(cwd: string): string | undefined {
   return base
 }
 
+/* ------------------------------------------------------------------ *
+ * v0.13 CLAUDE.md-style touch activation (read/write-triggered tags)  *
+ * ------------------------------------------------------------------ */
+
+const TOUCHED_DIRS_KEY = 'dsh-memory:touched-dirs'
+const TOUCHED_DIRS_CAP = 200
+
+/**
+ * Model tool → the argument naming a filesystem location it touches.
+ * Verified against the official tool sources: tool-fs read/edit/write take
+ * `file_path`; tool-fs-search grep/glob take `path`; shell bash/pwsh take
+ * `workdir`.
+ */
+const TOUCH_TOOL_ARGS: Record<string, string> = {
+  read: 'file_path', edit: 'file_path', write: 'file_path',
+  grep: 'path', glob: 'path',
+  bash: 'workdir', pwsh: 'workdir',
+}
+
+/**
+ * Plain-JSON validator for the touched-dirs state. The projection registry
+ * erases schemas to `{ parse(value) }` (its ErasedDefinition) and calls it
+ * only when seeding from the persisted cache — this is the zero-dependency
+ * equivalent of `z.array(z.string())`.
+ */
+const touchedDirsSchema = {
+  parse(value: unknown): string[] {
+    if (!Array.isArray(value) || value.some(x => typeof x !== 'string')) throw new Error('touched-dirs state must be a string array')
+    return value
+  },
+}
+
+/**
+ * Pure fold for TOUCHED_DIRS_KEY: `tool/call` events append their touched
+ * location string RAW — a relative path stays unresolved until injection,
+ * where the session's effective cwd is known (the reducer cannot know the
+ * cwd at event time). Returns the SAME state reference when an event adds
+ * nothing — the registry skips all downstream work on `Object.is`.
+ * The state rides the session event log (via sessionProjections), so it
+ * survives session resume and clears for fresh sessions — exactly the
+ * CLAUDE.md semantics we want.
+ */
+function foldTouchedDirs(state: unknown, event: unknown): string[] {
+  const cur = state as string[]
+  const e = event as { type?: unknown, name?: unknown, arguments?: unknown } | undefined
+  if (e === undefined || e.type !== 'tool/call') return cur
+  const argName = typeof e.name === 'string' ? TOUCH_TOOL_ARGS[e.name] : undefined
+  if (argName === undefined) return cur
+  const args = e.arguments as Record<string, unknown> | null | undefined
+  const raw = args !== null && typeof args === 'object' ? (args as Record<string, unknown>)[argName] : undefined
+  if (typeof raw !== 'string' || raw.trim() === '') return cur
+  if (cur.includes(raw)) return cur
+  const next = [...cur, raw]
+  return next.length > TOUCHED_DIRS_CAP ? next.slice(next.length - TOUCHED_DIRS_CAP) : next
+}
+
+/**
+ * Register the touched-dirs projection on the official sessionProjections
+ * service — inject-free `ctx.get` read (A3): lean hosts without the registry
+ * keep cwd-only activation. The definition carries BOTH registry
+ * generations' field names: newer hosts read `stateSchema` + host-only
+ * `stateOf`; the published rc line reads `schema` + `view` through
+ * `snapshot` (verified by registering a structural schema against the real
+ * published registry — it validates only `stateVersion`).
+ */
+function registerTouchedDirsProjection(ctx: Context): void {
+  const projections = (ctx as unknown as { get?: (name: string) => unknown }).get?.('sessionProjections') as
+    | { register?: (definition: unknown) => unknown }
+    | undefined
+  if (projections === undefined || typeof projections.register !== 'function') return
+  try {
+    projections.register({
+      key: TOUCHED_DIRS_KEY,
+      stateVersion: 1,
+      stateSchema: touchedDirsSchema,
+      schema: touchedDirsSchema,
+      view: (state: unknown) => state,
+      init: () => [],
+      apply: foldTouchedDirs,
+    })
+  } catch {
+    // registry present but contract drift: degrade to cwd-only activation
+  }
+}
+
+/**
+ * Read the touched-dirs state off whichever registry generation the host
+ * runs: newer hosts expose `stateOf(session, key)`; the published rc line
+ * only `snapshot(session)` (which covers every registered unit). Returns
+ * undefined whenever neither path works — touch activation silently
+ * degrades to the cwd chain.
+ */
+function readTouchedDirs(projections: unknown, session: unknown): string[] | undefined {
+  const p = projections as {
+    stateOf?: (session: unknown, key: string) => unknown
+    snapshot?: (session: unknown) => { values?: Record<string, unknown> }
+  } | undefined
+  try {
+    if (typeof p?.stateOf === 'function') {
+      const v = p.stateOf(session, TOUCHED_DIRS_KEY)
+      if (Array.isArray(v)) return v as string[]
+    }
+    if (typeof p?.snapshot === 'function') {
+      const v = p.snapshot(session)?.values?.[TOUCHED_DIRS_KEY]
+      if (Array.isArray(v)) return v as string[]
+    }
+  } catch {
+    // registry present but failing: degrade to cwd-only activation
+  }
+  return undefined
+}
+
+/**
+ * The session's EFFECTIVE cwd — the host workingDirectory service first
+ * (it follows `working_directory cd`; absent on lean hosts), else undefined
+ * so the caller's frozen-header fallback chain applies. Sync-only: safe
+ * inside the systemPrompt text callback (`get` is sync; `ensure` is async
+ * and belongs in tool execute paths only).
+ */
+function workingDirectoryCwd(ctx: Context, agent: unknown): string | undefined {
+  const session = (agent as { session?: unknown } | undefined)?.session
+  if (session === undefined) return undefined
+  const wd = (ctx as unknown as { get?: (name: string) => unknown }).get?.('workingDirectory') as
+    | { get?: (s: unknown) => unknown }
+    | undefined
+  if (wd === undefined || typeof wd.get !== 'function') return undefined
+  try {
+    const v = wd.get(session)
+    return typeof v === 'string' && v !== '' ? v : undefined
+  } catch {
+    return undefined // service present but failing: keep the frozen-header fallback
+  }
+}
+
+/** Every sub-directory tag covering absDir up to (excluding) the project root; nothing when absDir IS the root or sits outside it. */
+function dirTagChain(projRoot: string, absDir: string, into: Set<string>): void {
+  const rel = path.relative(projRoot, absDir)
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return
+  const parts = rel.split(path.sep)
+  for (let i = 1; i <= parts.length; i++) into.add(parts.slice(0, i).join('/'))
+}
+
 function registerMemoryGuidance(ctx: Context): void {
   const systemPrompt = (ctx as unknown as { systemPrompt?: SystemPromptService }).systemPrompt
   if (systemPrompt === undefined) return // host composition has no systemPrompt service
@@ -925,7 +1067,7 @@ function registerMemoryGuidance(ctx: Context): void {
       // path-tag filter follow THAT session (multi-workspace web hosts run
       // many sessions with different cwds). Without it we keep the legacy
       // process-wide behavior — still correct for single-workspace hosts.
-      const sessionCwd = sessionCwdOfAgent(args?.agent) ?? sessionCwdOfAgent(args?.scope) ?? extractSessionCwd(args?.scope) ?? process.cwd()
+      const sessionCwd = workingDirectoryCwd(ctx, args?.agent) ?? sessionCwdOfAgent(args?.agent) ?? sessionCwdOfAgent(args?.scope) ?? extractSessionCwd(args?.scope) ?? process.cwd()
       const projectBase = projectBaseFor(sessionCwd) ?? scopeDir('project')
       // BUG B fix (v0.11.4): scope admission used the module-level
       // activeScopes(), so a host started from a guarded directory ($HOME,
@@ -946,23 +1088,36 @@ function registerMemoryGuidance(ctx: Context): void {
         let lines = parseIndexLines(index, base) // orphans (deleted memory files) stay out of the prompt
         let hiddenElsewhere = 0
         if (scope === 'project' && base !== undefined) {
-          // CLAUDE.md-style lazy injection: root-level (untagged) project
-          // memories always inject; path-tagged memories only inject when the
-          // session's working directory falls inside that path — "you see
-          // memories for where you work."
+          // CLAUDE.md semantics (v0.13): root-level (untagged) project memories
+          // always inject; a path tag injects when it names the effective cwd
+          // itself or any of its ancestors (up to the project root), OR a
+          // directory this session TOUCHED — via read/edit/write/grep/glob/
+          // bash/pwsh tool calls — or one of that directory's ancestors. The
+          // set is monotone: touched stays injected until the session ends.
+          // The old over-inclusive rule (any tag DEEPER than the cwd injecting
+          // too) is gone — deep tags now activate exactly when touched.
           const projRoot = path.resolve(base, '..', '..')
-          const cwd = sessionCwd
-          // path-boundary check: a same-prefix sibling (myproj vs myproj0)
-          // must not be treated as inside the project
-          const rel = cwd.startsWith(projRoot + path.sep) ? path.relative(projRoot, cwd).split(path.sep).join('/') : ''
+          const activeTags = new Set<string>()
+          dirTagChain(projRoot, sessionCwd, activeTags)
+          const agentSession = (args?.agent as { session?: unknown } | undefined)?.session
+          if (agentSession !== undefined) {
+            const touched = readTouchedDirs((ctx as unknown as { get?: (name: string) => unknown }).get?.('sessionProjections'), agentSession)
+            if (touched !== undefined) {
+              for (const raw of touched) {
+                if (typeof raw !== 'string' || raw.trim() === '') continue
+                // relative paths resolve against the session's effective cwd;
+                // directories outside this workspace's root activate nothing
+                dirTagChain(projRoot, path.dirname(path.isAbsolute(raw) ? raw : path.resolve(sessionCwd, raw)), activeTags)
+              }
+            }
+          }
           const matched: string[] = []
           for (const l of lines) {
             // path tag is anchored right after the (YYYY-MM-DD) date stamp —
             // brackets inside a title or excerpt can never be misread as a tag
             const m = /\(\d{4}-\d{2}-\d{2}\) \[([^\]]+)\]/.exec(l)
             if (m === null) { matched.push(l); continue } // no path tag = root-level
-            const memPath = m[1]!
-            if (memPath === rel || rel.startsWith(memPath + '/') || memPath.startsWith(rel + '/')) matched.push(l)
+            if (activeTags.has(m[1]!)) matched.push(l)
             else hiddenElsewhere++
           }
           lines = matched
@@ -980,8 +1135,8 @@ function registerMemoryGuidance(ctx: Context): void {
           const parts: string[] = []
           if (droppedByCap > 0) parts.push(`+${droppedByCap} older beyond the 25-line injection cap`)
           if (hiddenElsewhere > 0) parts.push(shown.length > 0
-            ? `+${hiddenElsewhere} more tagged to other areas of this project`
-            : `all ${hiddenElsewhere} memories in this project are tagged to other areas`)
+            ? `+${hiddenElsewhere} more tagged to areas you haven't touched`
+            : `all ${hiddenElsewhere} memories in this project are tagged to areas you haven't touched`)
           const hint = `${parts.join('; ')} — memory_search surfaces them.`
           sectionText += (shown.length > 0 ? '\n' : '') + `(${hint})`
         }
@@ -999,6 +1154,7 @@ function registerMemoryGuidance(ctx: Context): void {
 export async function apply(ctx: Context): Promise<void> {
   await refineWithWorkspaceRegistry(ctx)
   registerMemoryGuidance(ctx)
+  registerTouchedDirsProjection(ctx)
 
   ctx.tools.register(defineTool({
     name: 'memory_save',
@@ -1008,7 +1164,7 @@ export async function apply(ctx: Context): Promise<void> {
       content: { type: 'string', required: true, description: 'The memory itself. Self-contained plain text or markdown; will matter months later without this chat.' },
       tags: { type: 'array', items: { type: 'string' }, description: 'Optional topical tags for retrieval.' },
       scope: { type: 'string', enum: ['user', 'project'], description: 'Where to store: "project" = team-shared decisions/conventions, committed to git (default inside a git repository); "user" = personal cross-project preferences (default outside a repo).' },
-      path: { type: 'string', description: 'Optional sub-directory this memory belongs to (relative to project root, e.g. "frontend/src"). Auto-recorded from working directory if omitted. Untagged (root-level) memories always inject; path-tagged memories only inject when the session works in that area.' },
+      path: { type: 'string', description: 'Optional sub-directory this memory belongs to (relative to project root, e.g. "frontend/src"). Auto-recorded from the session\'s effective working directory if omitted. Untagged (root-level) memories always inject; path-tagged memories inject once the session works in or touches (read/edit/write/grep/glob/shell calls) that area.' },
     },
     output: {
       // Loose object schema: execute returns either the success value or a
@@ -1022,11 +1178,13 @@ export async function apply(ctx: Context): Promise<void> {
       const content = safeSlice(args.content.trim(), MAX_CONTENT_CHARS)
       if (!title || !content) return simpleError('invalid_input', 'title and content must be non-empty.')
       // v0.11 write-side session scoping: the agent loop sets exec.agent; its
-      // session header cwd decides BOTH the default project scope and the
-      // path tag — reads and writes now target the same per-session workspace
-      // bucket (the rc1 read-only asymmetry is gone). Legacy hosts without
-      // exec.agent keep the process-anchored behavior.
-      const sessionCwd = sessionCwdOfAgent((exec as { agent?: unknown }).agent)
+      // session cwd decides BOTH the default project scope and the path tag —
+      // reads and writes now target the same per-session workspace bucket (the
+      // rc1 read-only asymmetry is gone). v0.13: the cwd is the session's
+      // EFFECTIVE directory (host workingDirectory service, which follows
+      // `working_directory cd`) with the frozen session header as fallback.
+      const agent = (exec as { agent?: unknown }).agent
+      const sessionCwd = workingDirectoryCwd(ctx, agent) ?? sessionCwdOfAgent(agent)
       const sessionBase = sessionCwd === undefined ? undefined : projectBaseFor(sessionCwd)
       let scope = args.scope
       if (scope === undefined) scope = (sessionBase ?? PROJECT_DIR) === undefined ? 'user' : 'project'
