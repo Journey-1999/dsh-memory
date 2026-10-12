@@ -135,7 +135,7 @@ test('v0.7 工作目录进入子目录后该区域记忆注入', async () => {
 test('P1 数据桥：GET /dsh-memory/api/v1/list 返回双域 JSON', async () => {
   const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/list')
   assert.ok(route, '路由应已注册')
-  assert.equal(route.method, 'GET')
+  assert.equal(route.kind, 'exact')
   let body = ''
   const res = { writeHead: () => {}, end: s => { body = s } }
   route.handler({}, res)
@@ -152,7 +152,7 @@ test('P1 数据桥：GET /dsh-memory/api/v1/list 返回双域 JSON', async () =>
 })
 
 const postSave = async body => {
-  const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/save' && r.method === 'POST')
+  const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/save' && r.kind === 'exact')
   assert.ok(route, 'POST 路由应已注册')
   const req = { async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)) } }
   let status = 0, resBody = ''
@@ -199,7 +199,7 @@ test('P2.1 POST /delete：删除单条 → 文件消失 + 索引行移除', asyn
   const saved = await postSave({ scope: 'user', title: 'Delete me', content: 'Temporary memory.' })
   assert.equal(saved.status, 200)
   const id = saved.data.id
-  const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/delete' && r.method === 'POST')
+  const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/delete' && r.kind === 'exact')
   assert.ok(route, 'delete 路由应已注册')
   const req = { async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ scope: 'user', id })) } }
   let status = 0, resBody = ''
@@ -215,7 +215,7 @@ test('P2.1 POST /delete：删除单条 → 文件消失 + 索引行移除', asyn
 })
 
 test('P2.1 POST /delete：恶意 id（路径穿越）被拒', async () => {
-  const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/delete' && r.method === 'POST')
+  const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/delete' && r.kind === 'exact')
   const req = { async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ scope: 'user', id: '../../etc/passwd' })) } }
   let status = 0, resBody = ''
   const res = { writeHead: s => { status = s }, end: s => { resBody = s } }
@@ -228,7 +228,7 @@ test('P2.1 POST /delete：恶意 id（路径穿越）被拒', async () => {
 test('P2.2 修复回归：面板 id 带 .md 后缀也能删除（真实 bug 场景）', async () => {
   const saved = await postSave({ scope: 'user', title: 'Dot-md id test', content: 'Panel parses ids from index lines, which carry the .md suffix.' })
   assert.equal(saved.status, 200)
-  const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/delete' && r.method === 'POST')
+  const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/delete' && r.kind === 'exact')
   const req = { async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ scope: 'user', id: `${saved.data.id}.md` })) } } // 带 .md！
   let status = 0, resBody = ''
   const res = { writeHead: s => { status = s }, end: s => { resBody = s } }
@@ -242,7 +242,7 @@ test('P2.2 read + update：编辑单条记忆端到端', async () => {
   assert.equal(saved.status, 200)
   const id = saved.data.id
   const call = async (ep, body) => {
-    const route = webRoutes.find(r => r.path === ep && r.method === 'POST')
+    const route = webRoutes.find(r => r.path === ep && r.kind === 'exact')
     const req = { async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)) } }
     let status = 0, resBody = ''
     const res = { writeHead: s => { status = s }, end: s => { resBody = s } }
@@ -421,4 +421,49 @@ test('v0.11.4 BUG A 回归：短标题不得静默覆盖同后缀长标题（数
   assert.notEqual(s1.id, s2.id, '两个独立文件')
   const r1 = await tool('memory_read').execute({ id: s1.id }, exec)
   assert.ok(r1.content.includes('Memory A original'), 'my-test 原内容必须完好（不丢失）')
+})
+
+test('v0.12.0 C5：密钥形态内容被代码层拒绝', async () => {
+  const r = await tool('memory_save').execute({ title: 'Leaked token', content: 'Use ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK for deploy' }, exec)
+  assert.ok(r.ok !== true && /credential|secret/i.test(r.message ?? r.error ?? ''), `应拒绝: ${JSON.stringify(r)}`)
+})
+
+test('v0.12.0 B5：索引外的记忆文件在面板可见（unindexed）', async () => {
+  const orphansDir = path.join(tmp, '.dsh', 'memory', 'memories')
+  writeFileSync(path.join(orphansDir, '20261012-000000-orphan-memory.md'), '---\nid: orphan\nscope: project\npath: \nsaved_at: 2026-10-12T00:00:00.000Z\ntags: \n---\n\n# Orphan memory\n\nNot in the index (beyond cap).\n')
+  const route = webRoutes.find(rr => rr.path === '/dsh-memory/api/v1/list')
+  let body = ''
+  route.handler({}, { writeHead: () => {}, end: s => { body = s } })
+  for (let i = 0; i < 50 && body === ''; i++) await new Promise(resolve => setTimeout(resolve, 10))
+  const group = JSON.parse(body).scopes.projects.find(p => p.serviceAnchor === true)
+  const orphan = (group.entries ?? []).find(e => e.id === '20261012-000000-orphan-memory')
+  assert.ok(orphan, '索引外文件应作为 unindexed 条目出现')
+  assert.equal(orphan.unindexed, true)
+  assert.equal(orphan.title, 'Orphan memory')
+})
+
+test('v0.12.0 C1+C2：面板 save 显式 path 标签 + 不回退进程 cwd', async () => {
+  const r = await postSave({ scope: 'user', title: 'Panel path tag test', content: 'Tagged via the form.', path: 'frontend/ui' })
+  assert.equal(r.status, 200)
+  const index = await fs.readFile(path.join(tmp, 'MEMORY.md'), 'utf8')
+  assert.ok(index.includes('[frontend/ui]'), 'path 标签应生效')
+})
+
+test('v0.12.0 A1：跨站来源被 403 拒绝，同源放行', async () => {
+  const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/save' && r.kind === 'exact')
+  for (const headers of [
+    { origin: 'http://evil.example', host: 'localhost:3000' },
+    { 'sec-fetch-site': 'cross-site' },
+    { host: 'attacker.example:1234' },
+  ]) {
+    let status = 0
+    await route.handler({ headers, async *[Symbol.asyncIterator]() {} }, { writeHead: s => { status = s }, end: () => {} })
+    assert.equal(status, 403, `应拒绝: ${JSON.stringify(headers)}`)
+  }
+  let status2 = 0, body2 = ''
+  await route.handler(
+    { headers: { origin: 'http://127.0.0.1:3000', host: '127.0.0.1:3000' }, async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ scope: 'user', title: 'A1 trusted', content: 'same-origin passes' })) } },
+    { writeHead: s => { status2 = s }, end: s => { body2 = s } })
+  for (let i = 0; i < 50 && body2 === ''; i++) await new Promise(r => setTimeout(r, 10))
+  assert.equal(status2, 200, '同源应放行')
 })

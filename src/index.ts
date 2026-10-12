@@ -67,7 +67,7 @@ const MAX_CONTENT_CHARS = 20_000
 const USER_DIR = process.env.DSH_MEMORY_USER_DIR
   ?? path.join(process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'), 'memory')
 
-const MAX_WALK_LEVELS = 8
+const MAX_WALK_LEVELS = 16 // C8: deep monorepos split buckets at 8 levels
 const MARKER_DIR = path.join('.dsh', 'memory')
 const VCS_MARKERS = ['.git', '.svn', '.hg'] as const
 
@@ -96,7 +96,10 @@ export function resolveProjectScope(startDir: string = process.cwd(), opts: { ho
   const home = path.resolve(opts.homeDir ?? os.homedir())
   const guarded = (d: string): boolean => {
     const r = path.resolve(d)
-    return r === home || r === '/' || r === '/tmp' || r === '/private/tmp'
+    if (r === home) return true
+    if (path.parse(r).root === r) return true // B4: any filesystem root ('/', 'C:\', …) — literal '/tmp' misses drive roots on Windows
+    const tmp = path.resolve(os.tmpdir())
+    return r === tmp || r === '/tmp' || r === '/private/tmp'
   }
   const envDir = process.env.DSH_MEMORY_PROJECT_DIR
   if (envDir !== undefined && envDir.trim() !== '' && path.isAbsolute(envDir) && !guarded(envDir)) {
@@ -124,10 +127,6 @@ const initialResolution = resolveProjectScope()
 let PROJECT_DIR: string | undefined = initialResolution.dir
 let projectDirSource: 'env' | 'walk' | 'cwd' | 'none' | 'workspace' = initialResolution.source
 
-function activeScopes(): Array<'user' | 'project'> {
-  return PROJECT_DIR === undefined ? ['user'] : ['user', 'project']
-}
-
 /**
  * Async level 3.5: when the sync chain had to fall back to cwd (no marker,
  * no VCS), the host workspace registry may still know the real project root
@@ -138,7 +137,7 @@ function activeScopes(): Array<'user' | 'project'> {
  */
 async function refineWithWorkspaceRegistry(ctx: Context): Promise<void> {
   if (projectDirSource !== 'cwd') return
-  const registry = (ctx as unknown as { workspaceRegistry?: { list(): Promise<unknown[]> } }).workspaceRegistry
+  const registry = (ctx as unknown as { get?: (name: string) => unknown }).get?.('workspaceRegistry') as { list(): Promise<unknown[]> } | undefined // A3: undeclared-inject property reads throw on lean fibers; ctx.get is the official inject-free read
   if (registry === undefined || typeof registry.list !== 'function') return
   try {
     const entries = await registry.list()
@@ -146,7 +145,7 @@ async function refineWithWorkspaceRegistry(ctx: Context): Promise<void> {
     let best: string | undefined
     for (const entry of entries) {
       const e = entry as Record<string, unknown>
-      const raw = typeof e.directory === 'function' ? String(e.directory()) : e.directory
+      const raw = e.path ?? (typeof e.directory === 'function' ? String(e.directory()) : e.directory) // A4: real Workspace field is `path`; `directory` kept as legacy shape
       if (typeof raw !== 'string' || !path.isAbsolute(raw)) continue
       const root = path.resolve(raw)
       const rel = path.relative(root, cwd)
@@ -194,6 +193,9 @@ function safeSlice(s: string, n: number): string {
 /** Full-width brackets in free text, so index-line links and the date-anchored path-tag parser stay unambiguous. */
 const indexSafe = (s: string) => s.replace(/\[/g, '\uff3b').replace(/\]/g, '\uff3d')
 
+/** High-confidence credential shapes (C5): key blocks and well-known token prefixes. */
+const SECRET_PATTERN = /-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{32,}|xox[bap]-[0-9A-Za-z-]{20,}/
+
 /** A tag must not carry the two characters that structure the index line and the frontmatter. */
 const sanitizeTag = (t: string) => t.replace(/[`,]/g, '').trim()
 
@@ -234,7 +236,7 @@ async function writeIndexGuarded(base: string, lines: string[]): Promise<number>
   // Atomic on disk (P0): write a sibling tmp file, then rename over the target,
   // so a crash mid-write can never leave a half-written MEMORY.md — the
   // prerequisite for a concurrent visual editor. This guarantees file
-  // integrity, not last-writer-wins semantics: the read-modify-write race
+  // integrity, not last-writer-wins semantics (known limitation — a concurrent writer's update can be lost; the index cap prunes the damage): the read-modify-write race
   // (lost update) is deliberately left to the P2 optimistic lock. On Windows
   // a transiently-open target can fail the rename with EPERM; retry once.
   const target = indexFileOf(base)
@@ -310,6 +312,12 @@ type SaveCoreResult =
 async function saveMemoryCore(input: SaveCoreInput): Promise<SaveCoreResult> {
   const { scope, base, title, content } = input
   const tags = (input.tags ?? []).map(sanitizeTag).filter(t => t !== '')
+
+  // C5: lightweight high-confidence secret scan — credential-shaped content
+  // is refused at the code level, not only by prompt rule.
+  if (SECRET_PATTERN.test(title) || SECRET_PATTERN.test(content)) {
+    return { ok: false, error: 'refused: content looks like a credential or private key — never save secrets' }
+  }
   try {
     const now = new Date()
     const slug = slugify(title)
@@ -381,11 +389,11 @@ async function recordWorkspace(): Promise<void> {
 async function knownWorkspaces(ctx: Context): Promise<string[]> {
   const roots = new Set<string>()
   try {
-    const registry = (ctx as unknown as { workspaceRegistry?: { list(): Promise<unknown[]> } }).workspaceRegistry
+    const registry = (ctx as unknown as { get?: (name: string) => unknown }).get?.('workspaceRegistry') as { list(): Promise<unknown[]> } | undefined // A3: undeclared-inject property reads throw on lean fibers; ctx.get is the official inject-free read
     if (registry !== undefined && typeof registry.list === 'function') {
       for (const entry of await registry.list()) {
         const e = entry as Record<string, unknown>
-        const raw = typeof e.directory === 'function' ? String(e.directory()) : e.directory
+        const raw = e.path ?? (typeof e.directory === 'function' ? String(e.directory()) : e.directory) // A4
         if (typeof raw === 'string' && path.isAbsolute(raw)) roots.add(path.resolve(raw))
       }
     }
@@ -418,7 +426,7 @@ async function handlePanelSave(ctx: Context, request: IncomingMessage, response:
       if (size > 1_000_000) { reply(413, { ok: false, error: 'body too large' }); return }
       chunks.push(chunk as Buffer)
     }
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { scope?: unknown, workspace?: unknown, title?: unknown, content?: unknown, tags?: unknown }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { scope?: unknown, workspace?: unknown, title?: unknown, content?: unknown, tags?: unknown, path?: unknown }
     const title = safeSlice(String(body.title ?? '').trim(), 60)
     const content = safeSlice(String(body.content ?? '').trim(), MAX_CONTENT_CHARS)
     const tags = (Array.isArray(body.tags) ? body.tags : []).filter((t): t is string => typeof t === 'string').slice(0, 10)
@@ -438,7 +446,7 @@ async function handlePanelSave(ctx: Context, request: IncomingMessage, response:
       reply(400, { ok: false, error: 'scope must be "user" or "project"' }); return
     }
     if (base === undefined) { reply(400, { ok: false, error: 'target scope unavailable' }); return }
-    const r = await saveMemoryCore({ scope: body.scope, base, title, content, tags })
+    const r = await saveMemoryCore({ scope: body.scope, base, title, content, tags, sessionCwd: '', memPathArg: typeof body.path === 'string' ? body.path : undefined }) // C1: panel saves are root-level unless an explicit path tag is given — never fall back to the process cwd
     if (!r.ok) { reply(500, { ok: false, error: r.error }); return }
     reply(200, r)
   } catch (e) {
@@ -508,7 +516,7 @@ async function handlePanelUpdate(ctx: Context, request: IncomingMessage, respons
       chunks.push(chunk as Buffer)
       if (chunks.reduce((n, c) => n + c.length, 0) > 1_000_000) { reply(413, { ok: false, error: 'body too large' }); return }
     }
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { scope?: unknown, workspace?: unknown, id?: unknown, title?: unknown, content?: unknown, tags?: unknown }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { scope?: unknown, workspace?: unknown, id?: unknown, title?: unknown, content?: unknown, tags?: unknown, path?: unknown }
     const rawId = String(body.id ?? '').replace(/\.md$/, '')
     if (!/^[a-zA-Z0-9\u4e00-\u9fff_-]+$/.test(rawId)) { reply(400, { ok: false, error: 'invalid id' }); return }
     const title = body.title === undefined ? undefined : safeSlice(String(body.title).trim(), 60)
@@ -516,6 +524,7 @@ async function handlePanelUpdate(ctx: Context, request: IncomingMessage, respons
     const tags = Array.isArray(body.tags) ? body.tags.filter((t): t is string => typeof t === 'string').slice(0, 10) : undefined
     if (title === '') { reply(400, { ok: false, error: 'title must be non-empty' }); return }
     if (content === '') { reply(400, { ok: false, error: 'content must be non-empty' }); return }
+    const pathArg = typeof body.path === 'string' ? body.path.trim().replace(/[^a-zA-Z0-9\u4e00-\u9fff/_-]+/g, '-').replace(/^-+|-+$/g, '') : undefined
     let base: string | undefined
     if (body.scope === 'user') {
       base = scopeDir('user')
@@ -533,10 +542,10 @@ async function handlePanelUpdate(ctx: Context, request: IncomingMessage, respons
     if (base === undefined) { reply(400, { ok: false, error: 'target scope unavailable' }); return }
     const file = path.join(memoryDirOf(base), `${rawId}.md`)
     if (!existsSync(file)) { reply(404, { ok: false, error: 'memory not found' }); return }
-    const text = await fs.readFile(file, 'utf8')
+    const text = (await fs.readFile(file, 'utf8')).replace(/\r\n/g, '\n') // C9: hand-edited CRLF files stay editable
     const fm = /^---\n([\s\S]*?)\n---\n\n# (.*)\n\n([\s\S]*)$/.exec(text)
     if (fm === null) { reply(422, { ok: false, error: 'unrecognized memory file format' }); return }
-    const oldPath = /^path: (.*)$/m.exec(fm[1]!)?.[1] ?? ''
+    const oldPath = pathArg ?? (/^path: (.*)$/m.exec(fm[1]!)?.[1] ?? '') // C2: an explicit path arg re-tags the memory''
     const oldScope = /^scope: (.*)$/m.exec(fm[1]!)?.[1] ?? String(body.scope)
     const newTitle = title ?? fm[2]!
     const newContent = content ?? fm[3]!
@@ -654,7 +663,7 @@ async function handlePanelRead(ctx: Context, request: IncomingMessage, response:
     if (base === undefined) { reply(400, { ok: false, error: 'target scope unavailable' }); return }
     const file = path.join(memoryDirOf(base), `${id}.md`)
     if (!existsSync(file)) { reply(404, { ok: false, error: 'memory not found' }); return }
-    const text = await fs.readFile(file, 'utf8')
+    const text = (await fs.readFile(file, 'utf8')).replace(/\r\n/g, '\n') // C9: hand-edited CRLF files stay editable
     const fm = /^---\n([\s\S]*?)\n---\n\n# (.*)\n\n([\s\S]*)$/.exec(text)
     if (fm === null) { reply(422, { ok: false, error: 'unrecognized memory file format' }); return }
     const memPath = /^path: (.*)$/m.exec(fm[1]!)?.[1] ?? ''
@@ -682,8 +691,42 @@ const SAVE_DESCRIPTION = [
 const SEARCH_DESCRIPTION = 'Search saved memories by keyword (case-insensitive substring match across titles, tags, and content). Call this when prior context, user preferences, or earlier decisions may be relevant to the current task — before re-asking the user.'
 
 /** Narrow structural type for the host webServer route service (P1 panel data bridge). */
+/**
+ * Panel-endpoint origin gate (A1): the host does no auth on plugin routes
+ * (gzip -> pathname -> handler), and the panel has no CORS headers — a
+ * text/plain cross-site POST is a simple request, no preflight, so a hostile
+ * page could blind-write memories that inject into the next session's system
+ * prompt. Modern browsers are stopped by Sec-Fetch-Site + Origin-vs-Host;
+ * DNS rebinding is stopped by the Host allow-list (localhost variants or a
+ * bare IP — LAN access stays legal). Local clients without these headers pass.
+ */
+function isTrustedPanelRequest(request: IncomingMessage): boolean {
+  const h = request.headers ?? {}
+  const site = h['sec-fetch-site']
+  if (typeof site === 'string' && site !== 'same-origin' && site !== 'none') return false
+  const origin = h.origin
+  if (typeof origin === 'string') {
+    try {
+      if (new URL(origin).host !== h.host) return false
+    } catch {
+      return false
+    }
+  }
+  const host = h.host
+  if (host !== undefined
+    && !/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host)
+    && !/^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(host)
+    && !/^\[[0-9a-f:]+\](:\d+)?$/i.test(host)) return false
+  return true
+}
+
+function refuseCrossOrigin(response: ServerResponse): void {
+  response.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+  response.end(JSON.stringify({ ok: false, error: 'cross-origin request refused' }))
+}
+
 interface WebServerRouteService {
-  register(route: { method: string, path: string, handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void> }): () => void
+  register(route: { kind: 'exact' | 'prefix', path: string, handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void> }): () => void
 }
 
 /** Parse one index line into a panel entry (tolerant: unparseable lines degrade, never throw). */
@@ -706,13 +749,37 @@ function scopeStats(base: string): { stats: Record<string, number>, entries: Arr
   try { indexBytes = statSync(indexFileOf(base)).size } catch { indexBytes = 0 }
   let memoryFiles = 0
   try { memoryFiles = readdirSync(memoryDirOf(base)).filter(f => f.endsWith('.md')).length } catch { memoryFiles = 0 }
+  // B5: memories beyond the index cap (or orphaned by hand edits) stay
+  // invisible to the panel even though search/read can still find them —
+  // surface them as unindexed entries so the panel can edit/delete them too.
+  const indexedFiles = new Set(lines.map(l => /\(memories\/([^)]+)\)/.exec(l)?.[1]).filter((x): x is string => x !== undefined))
+  const entries: Array<Record<string, unknown>> = lines.map(parseEntryLine)
+  let memFiles: string[] = []
+  try { memFiles = readdirSync(memoryDirOf(base)).filter(f => f.endsWith('.md')) } catch { /* none */ }
+  for (const f of memFiles) {
+    if (indexedFiles.has(f)) continue
+    try {
+      const text = readFileSync(path.join(memoryDirOf(base), f), 'utf8').replace(/\r\n/g, '\n')
+      const fm = /^---\n([\s\S]*?)\n---\n\n# (.*)\n\n([\s\S]*)$/.exec(text)
+      const savedAt = /^saved_at: (.*)$/m.exec(fm?.[1] ?? '')?.[1] ?? ''
+      entries.push({
+        id: f.replace(/\.md$/, ''),
+        title: fm?.[2] ?? f.replace(/\.md$/, ''),
+        date: savedAt.slice(0, 10),
+        path: /^path: (.*)$/m.exec(fm?.[1] ?? '')?.[1] ?? '',
+        tags: (/^tags: (.*)$/m.exec(fm?.[1] ?? '')?.[1] ?? '').split(',').map(s => s.trim()).filter(s => s !== ''),
+        excerpt: (fm?.[3] ?? '').split('\n')[0]?.slice(0, 100) ?? '',
+        unindexed: true,
+      })
+    } catch { /* unreadable file stays hidden */ }
+  }
   return {
     stats: {
       entries: lines.length, maxEntries: MAX_INDEX_LINES,
       indexBytes, maxBytes: MAX_INDEX_BYTES,
       memoryFiles, maxMemories: MAX_MEMORIES,
     },
-    entries: lines.map(parseEntryLine),
+    entries,
   }
 }
 
@@ -917,17 +984,21 @@ function registerMemoryGuidance(ctx: Context): void {
           lines = matched
         }
         const shown = lines.slice(0, 25)
-        if (shown.length === 0 && hiddenElsewhere === 0) continue
+        const droppedByCap = lines.length - shown.length // B3: cap-dropped entries count too — nothing is silently hidden
+        if (shown.length === 0 && hiddenElsewhere === 0 && droppedByCap === 0) continue
         const label = scope === 'user' ? 'User memories (cross-project, personal)' : 'Project memories (team-shared, filtered to your working area)'
         let sectionText = `### ${label}, newest first:\n` + shown.join('\n')
-        if (hiddenElsewhere > 0) {
+        if (hiddenElsewhere > 0 || droppedByCap > 0) {
           // Two-stage lazy loading (v0.7): nothing is silently hidden — the
           // index says how many memories exist outside the current working
           // area; memory_search surfaces them on demand, so context cost is
           // paid only when actually needed.
-          const hint = shown.length > 0
-            ? `+${hiddenElsewhere} more tagged to other areas of this project — memory_search surfaces them.`
-            : `all ${hiddenElsewhere} memories in this project are tagged to other areas — memory_search surfaces them.`
+          const parts: string[] = []
+          if (droppedByCap > 0) parts.push(`+${droppedByCap} older beyond the 25-line injection cap`)
+          if (hiddenElsewhere > 0) parts.push(shown.length > 0
+            ? `+${hiddenElsewhere} more tagged to other areas of this project`
+            : `all ${hiddenElsewhere} memories in this project are tagged to other areas`)
+          const hint = `${parts.join('; ')} — memory_search surfaces them.`
           sectionText += (shown.length > 0 ? '\n' : '') + `(${hint})`
         }
         sections.push(sectionText)
@@ -1004,7 +1075,7 @@ export async function apply(ctx: Context): Promise<void> {
       const limit = Math.min(Math.max(Math.trunc(args.limit ?? DEFAULT_SEARCH_LIMIT), 1), 20)
       const lower = q.toLowerCase()
       const scopes: Array<'user' | 'project'> = args.scope === undefined ? (projectBasesFor(exec).length > 0 ? ['user', 'project'] : ['user']) : [args.scope] // BUG B fix: admission follows session-resolved buckets
-      const matches: Array<{ scope: string, id: string, title: string, excerpt: string }> = []
+      const matches: Array<{ scope: string, id: string, title: string, excerpt: string, workspace?: string }> = []
       for (const scope of scopes) {
         // v0.11.1: the project scope follows the calling session's workspace
         // first, the service anchor second — the injection's "memory_search
@@ -1022,7 +1093,7 @@ export async function apply(ctx: Context): Promise<void> {
           const text = await fs.readFile(path.join(dir, f), 'utf8').catch(() => '')
           if (text.toLowerCase().includes(lower)) {
             const titleLine = /^#\s+(.+)$/m.exec(text)?.[1] ?? f
-            matches.push({ scope, id: f.replace(/\.md$/, ''), title: titleLine, excerpt: excerpt(text, q) })
+            matches.push({ scope, id: f.replace(/\.md$/, ''), title: titleLine, excerpt: excerpt(text, q), workspace: scope === 'project' ? path.resolve(base, '..', '..') : undefined }) // B2: model can tell which workspace a project hit came from
           }
         }
         }
@@ -1046,7 +1117,7 @@ export async function apply(ctx: Context): Promise<void> {
     },
     async execute(args: { id: string }, exec) {
       if (exec.signal.aborted) return simpleError('aborted', 'Read aborted.')
-      const safe = args.id.replace(/[^a-zA-Z0-9\u4e00-\u9fff-]/g, '')
+      const safe = args.id.replace(/[^a-zA-Z0-9\u4e00-\u9fff_-]/g, '') // C7: allow underscore, matching the panel's charset
       // Field set mirrors Claude Code's shipped project_memory_read contract
       // (sdk-tools.d.ts): content?, local_file?, size_bytes, updated_at,
       // truncated — oversized memories return a truncated preview plus the
@@ -1127,9 +1198,10 @@ export async function apply(ctx: Context): Promise<void> {
     const webServer = (webCtx as unknown as { webServer?: WebServerRouteService }).webServer
     if (webServer === undefined) return
     webServer.register({
-      method: 'GET',
+      kind: 'exact', // A2: host routes are {kind,path,handler}; method policing lives in the origin gate
       path: '/dsh-memory/api/v1/list',
-      handler: (_request, response) => {
+      handler: (request, response) => {
+        if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
         void buildPanelPayload(ctx).then(payload => {
           response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
           response.end(JSON.stringify(payload))
@@ -1140,30 +1212,34 @@ export async function apply(ctx: Context): Promise<void> {
       },
     })
     webServer.register({
-      method: 'POST',
+      kind: 'exact', // A2
       path: '/dsh-memory/api/v1/save',
       handler: (request, response) => {
+        if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
         void handlePanelSave(ctx, request, response)
       },
     })
     webServer.register({
-      method: 'POST',
+      kind: 'exact', // A2
       path: '/dsh-memory/api/v1/delete',
       handler: (request, response) => {
+        if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
         void handlePanelDelete(ctx, request, response)
       },
     })
     webServer.register({
-      method: 'POST',
+      kind: 'exact', // A2
       path: '/dsh-memory/api/v1/update',
       handler: (request, response) => {
+        if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
         void handlePanelUpdate(ctx, request, response)
       },
     })
     webServer.register({
-      method: 'POST',
+      kind: 'exact', // A2
       path: '/dsh-memory/api/v1/read',
       handler: (request, response) => {
+        if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
         void handlePanelRead(ctx, request, response)
       },
     })

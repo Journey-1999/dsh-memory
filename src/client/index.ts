@@ -240,6 +240,7 @@ function MemoryForm(props: { target: SaveTarget, initial?: PanelEntry, onDone: (
   const [title, setTitle] = useState(props.initial?.title ?? '')
   const [content, setContent] = useState('')
   const [tags, setTags] = useState(props.initial?.tags.join(', ') ?? '')
+  const [memPath, setMemPath] = useState(props.initial?.path ?? '')
   const [loading, setLoading] = useState(editing)
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -269,8 +270,8 @@ function MemoryForm(props: { target: SaveTarget, initial?: PanelEntry, onDone: (
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(editing
-        ? { scope: props.target.scope, workspace: props.target.workspace, id: props.initial!.id, title, content, tags: tagList }
-        : { scope: props.target.scope, workspace: props.target.workspace, title, content, tags: tagList }),
+        ? { scope: props.target.scope, workspace: props.target.workspace, id: props.initial!.id, title, content, tags: tagList, path: memPath.trim() === '' ? undefined : memPath.trim() }
+        : { scope: props.target.scope, workspace: props.target.workspace, title, content, tags: tagList, path: memPath.trim() === '' ? undefined : memPath.trim() }),
     })
       .then(async r => {
         const d = r.json() as Promise<{ ok?: boolean, error?: string }>
@@ -284,6 +285,7 @@ function MemoryForm(props: { target: SaveTarget, initial?: PanelEntry, onDone: (
     h('input', { style: S.input, placeholder: 'Title (max 60 chars)', value: title, maxLength: 60, autoFocus: true, onChange: (e: ChangeEvent<HTMLInputElement>) => setTitle(e.target.value) }),
     h('textarea', { style: S.textarea, placeholder: 'The memory itself — self-contained, will matter months later', value: content, rows: 4, onChange: (e: ChangeEvent<HTMLTextAreaElement>) => setContent(e.target.value) }),
     h('input', { style: S.input, placeholder: 'Tags, comma-separated (optional)', value: tags, onChange: (e: ChangeEvent<HTMLInputElement>) => setTags(e.target.value) }),
+    h('input', { style: S.input, placeholder: 'Sub-directory tag, e.g. frontend/src (optional)', value: memPath, onChange: (e: ChangeEvent<HTMLInputElement>) => setMemPath(e.target.value) }),
     formError !== null ? h('div', { style: S.error }, formError) : null,
     h('div', null,
       h('button', { style: S.button, type: 'submit', disabled: saving || title.trim() === '' || content.trim() === '' }, saving ? 'Saving…' : editing ? 'Save changes' : 'Save memory'),

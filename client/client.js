@@ -320,6 +320,7 @@ window.__ModuleLoader__.load({
 			const [title, setTitle] = (0, react.useState)(props.initial?.title ?? "");
 			const [content, setContent] = (0, react.useState)("");
 			const [tags, setTags] = (0, react.useState)(props.initial?.tags.join(", ") ?? "");
+			const [memPath, setMemPath] = (0, react.useState)(props.initial?.path ?? "");
 			const [loading, setLoading] = (0, react.useState)(editing);
 			const [formError, setFormError] = (0, react.useState)(null);
 			const [saving, setSaving] = (0, react.useState)(false);
@@ -360,13 +361,15 @@ window.__ModuleLoader__.load({
 						id: props.initial.id,
 						title,
 						content,
-						tags: tagList
+						tags: tagList,
+						path: memPath.trim() === "" ? void 0 : memPath.trim()
 					} : {
 						scope: props.target.scope,
 						workspace: props.target.workspace,
 						title,
 						content,
-						tags: tagList
+						tags: tagList,
+						path: memPath.trim() === "" ? void 0 : memPath.trim()
 					})
 				}).then(async (r) => {
 					const d = r.json();
@@ -399,6 +402,11 @@ window.__ModuleLoader__.load({
 				placeholder: "Tags, comma-separated (optional)",
 				value: tags,
 				onChange: (e) => setTags(e.target.value)
+			}), (0, react.createElement)("input", {
+				style: S.input,
+				placeholder: "Sub-directory tag, e.g. frontend/src (optional)",
+				value: memPath,
+				onChange: (e) => setMemPath(e.target.value)
 			}), formError !== null ? (0, react.createElement)("div", { style: S.error }, formError) : null, (0, react.createElement)("div", null, (0, react.createElement)("button", {
 				style: S.button,
 				type: "submit",
