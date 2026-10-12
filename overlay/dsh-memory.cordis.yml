@@ -1,5 +1,5 @@
 # Enable dsh-memory — hierarchical Claude Code-style persistent memory.
-# Install first: npm install -g dsh-memory
+# Install first: npm install -g @fooxe/dsh-memory
 # Then: dsh web --patch ./overlay/dsh-memory.cordis.yml
 # To persist across runs, merge this insert patch into
 # $DSH_HOME/cordis.patch.yml (all profiles) or

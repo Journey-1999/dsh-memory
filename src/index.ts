@@ -194,6 +194,9 @@ function safeSlice(s: string, n: number): string {
 /** Full-width brackets in free text, so index-line links and the date-anchored path-tag parser stay unambiguous. */
 const indexSafe = (s: string) => s.replace(/\[/g, '\uff3b').replace(/\]/g, '\uff3d')
 
+/** A tag must not carry the two characters that structure the index line and the frontmatter. */
+const sanitizeTag = (t: string) => t.replace(/[`,]/g, '').trim()
+
 async function ensureDirs(base: string): Promise<void> {
   await fs.mkdir(memoryDirOf(base), { recursive: true })
 }
@@ -306,6 +309,7 @@ type SaveCoreResult =
  */
 async function saveMemoryCore(input: SaveCoreInput): Promise<SaveCoreResult> {
   const { scope, base, title, content } = input
+  const tags = (input.tags ?? []).map(sanitizeTag).filter(t => t !== '')
   try {
     const now = new Date()
     const slug = slugify(title)
@@ -314,7 +318,12 @@ async function saveMemoryCore(input: SaveCoreInput): Promise<SaveCoreResult> {
     const dir = memoryDirOf(base)
     // Claude-Code write rule — dedupe-and-update: same title slug updates in
     // place instead of appending a near-duplicate.
-    const existing = (await fs.readdir(dir).catch(() => [] as string[])).find(f => f.endsWith(`-${slug}.md`))
+    // BUG A fix (v0.11.4): suffix matching (`endsWith('-' + slug)`) let a
+    // short title (e.g. "test") silently OVERWRITE an unrelated memory whose
+    // slug it terminates ("my-test"). Match the exact id segment instead:
+    // <YYYYMMDD-HHmmss>-<slug>.md with the slug regex-escaped.
+    const idPattern = new RegExp(`^\\d{8}-\\d{6}-${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.md$`)
+    const existing = (await fs.readdir(dir).catch(() => [] as string[])).find(f => idPattern.test(f))
     const id = existing === undefined ? `${timestamp(now)}-${slug}` : existing.replace(/\.md$/, '')
     const updated = existing !== undefined
     const file = path.join(dir, `${id}.md`)
@@ -328,9 +337,9 @@ async function saveMemoryCore(input: SaveCoreInput): Promise<SaveCoreResult> {
       const cwd = input.sessionCwd ?? process.cwd()
       if (cwd.startsWith(projRoot + path.sep)) memPath = path.relative(projRoot, cwd).split(path.sep).join('/')
     }
-    const header = `---\nid: ${id}\nscope: ${scope}\npath: ${memPath}\nsaved_at: ${now.toISOString()}\ntags: ${(input.tags ?? []).join(', ')}\n---\n\n# ${title}\n\n`
+    const header = `---\nid: ${id}\nscope: ${scope}\npath: ${memPath}\nsaved_at: ${now.toISOString()}\ntags: ${tags.join(', ')}\n---\n\n# ${title}\n\n`
     await atomicWriteFile(file, header + content + '\n')
-    const tagSuffix = input.tags?.length ? ` \`${input.tags.join('` `')}\`` : ''
+    const tagSuffix = tags.length ? ` \`${tags.join('` `')}\`` : ''
     const pathTag = memPath !== '' ? ` [${memPath}]` : ''
     const indexLine = `- [${indexSafe(title)}](memories/${id}.md) — ${indexSafe(safeSlice(content.split('\n')[0] ?? '', 80))} (${date})${pathTag}${tagSuffix}`
     const lines = (await readIndex(base)).filter(l => !l.includes(`(memories/${id}.md)`))
@@ -531,7 +540,7 @@ async function handlePanelUpdate(ctx: Context, request: IncomingMessage, respons
     const oldScope = /^scope: (.*)$/m.exec(fm[1]!)?.[1] ?? String(body.scope)
     const newTitle = title ?? fm[2]!
     const newContent = content ?? fm[3]!
-    const newTags = tags ?? (/^tags: (.*)$/m.exec(fm[1]!)?.[1] ?? '').split(',').map(s => s.trim()).filter(s => s !== '')
+    const newTags = (tags ?? (/^tags: (.*)$/m.exec(fm[1]!)?.[1] ?? '').split(',').map(s => s.trim()).filter(s => s !== '')).map(sanitizeTag).filter(t => t !== '')
     const now = new Date()
     const date = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`
     const header = `---\nid: ${rawId}\nscope: ${oldScope}\npath: ${oldPath}\nsaved_at: ${now.toISOString()}\ntags: ${newTags.join(', ')}\n---\n\n# ${newTitle}\n\n`
@@ -867,8 +876,14 @@ function registerMemoryGuidance(ctx: Context): void {
       // process-wide behavior — still correct for single-workspace hosts.
       const sessionCwd = sessionCwdOfAgent(args?.agent) ?? sessionCwdOfAgent(args?.scope) ?? extractSessionCwd(args?.scope) ?? process.cwd()
       const projectBase = projectBaseFor(sessionCwd) ?? scopeDir('project')
+      // BUG B fix (v0.11.4): scope admission used the module-level
+      // activeScopes(), so a host started from a guarded directory ($HOME,
+      // /tmp) had NO project domain even though the session's workspace bucket
+      // existed — saved memories never injected back. Admission now follows
+      // the session-resolved base.
+      const injectScopes: Array<'user' | 'project'> = projectBase === undefined ? ['user'] : ['user', 'project']
       const sections: string[] = []
-      for (const scope of activeScopes()) {
+      for (const scope of injectScopes) {
         const base = scope === 'project' ? projectBase : scopeDir(scope)
         if (base === undefined) continue
         let index = ''
@@ -988,7 +1003,7 @@ export async function apply(ctx: Context): Promise<void> {
       if (!q) return simpleError('invalid_input', 'query must be non-empty.')
       const limit = Math.min(Math.max(Math.trunc(args.limit ?? DEFAULT_SEARCH_LIMIT), 1), 20)
       const lower = q.toLowerCase()
-      const scopes = args.scope === undefined ? activeScopes() : [args.scope]
+      const scopes: Array<'user' | 'project'> = args.scope === undefined ? (projectBasesFor(exec).length > 0 ? ['user', 'project'] : ['user']) : [args.scope] // BUG B fix: admission follows session-resolved buckets
       const matches: Array<{ scope: string, id: string, title: string, excerpt: string }> = []
       for (const scope of scopes) {
         // v0.11.1: the project scope follows the calling session's workspace
@@ -1080,7 +1095,8 @@ export async function apply(ctx: Context): Promise<void> {
       if (exec.signal.aborted) return simpleError('aborted', 'List aborted.')
       const limit = Math.min(Math.max(Math.trunc(args.limit ?? DEFAULT_SEARCH_LIMIT), 1), 50)
       const out: Record<string, { total: number, truncated: boolean, entries: string[] }> = {}
-      for (const scope of activeScopes()) {
+      const listScopes: Array<'user' | 'project'> = projectBasesFor(exec).length > 0 ? ['user', 'project'] : ['user'] // BUG B fix
+      for (const scope of listScopes) {
         // v0.11.1: project lists merge the session workspace and the service
         // anchor (session first, id-deduped) so both stay visible.
         const bases = scope === 'project' ? projectBasesFor(exec) : [scopeDir(scope)].filter((b): b is string => b !== undefined)

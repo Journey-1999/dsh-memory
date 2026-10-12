@@ -413,3 +413,12 @@ test('v0.11.2 空态显示：目录存在但无记忆的工作区也列出（引
   assert.equal(group.entries.length, 0, '条目为空')
   assert.equal(group.stats.entries, 0, 'stats 全 0')
 })
+
+test('v0.11.4 BUG A 回归：短标题不得静默覆盖同后缀长标题（数据丢失）', async () => {
+  const s1 = await tool('memory_save').execute({ title: 'my-test', content: 'Memory A original content' }, exec)
+  const s2 = await tool('memory_save').execute({ title: 'test', content: 'Memory B unrelated' }, exec)
+  assert.equal(s2.updated, false, 'test 不是 my-test 的同主题更新，应为独立新建')
+  assert.notEqual(s1.id, s2.id, '两个独立文件')
+  const r1 = await tool('memory_read').execute({ id: s1.id }, exec)
+  assert.ok(r1.content.includes('Memory A original'), 'my-test 原内容必须完好（不丢失）')
+})

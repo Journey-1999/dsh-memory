@@ -162,14 +162,14 @@ Guard: `$HOME`, `/` and `/tmp` never become a scope — a dotfiles `~/.git` cann
 <project-root>/.dsh/memory/      <- project scope (team-shared)
 ```
 
-Hosts without the `systemPrompt` service simply skip auto-injection — all four tools keep working.
+The plugin declares `inject = ['tools', 'systemPrompt']`, so on hosts without the `systemPrompt` service it never activates at all (cordis enforces the declaration) — tools and injection arrive together or not at all.
 
 ## Verification
 
 Three levels, all runnable from the repo:
 
 ```sh
-npm install && npm run build && npm test   # 22 tests, zero type errors
+npm install && npm run build && npm test   # 50+ tests, zero type errors
 ```
 
 - **Unit** — index truncation, save/search round-trip, review guards (no `require()` in ESM; plugin name matches package name)
