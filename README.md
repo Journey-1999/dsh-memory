@@ -31,13 +31,13 @@ No server. No account. No embedding provider. Just plain markdown files — dele
 
 **v0.11 — an EDITABLE memory manager, session-scoped on both sides.** Open **Settings → Memory**: not a config page — a full manager. Every memory from both scopes in one searchable list, workspaces as an expandable tree (nested sub-project scopes discovered automatically), sub-folder grouping, live guard gauges (index lines / KB / file count), and **full in-panel editing**: add, rewrite, or delete any memory through the exact same guarded pipeline as the agent's own tool calls — what you fix in the UI is precisely what the model sees next session. And v0.11 scopes BOTH sides to the session's workspace: each session's prompt carries ITS workspace's memories, and memory_save lands in that same workspace — no more cross-workspace bleed in multi-session web hosts. Workspaces with zero memories still show as empty groups — that's where you add the first one.
 
-Memories are **tiered three ways — personal (user scope), per-workspace (project scope), per-session (v0.11)** — so cross-project preferences, team decisions, and session context never bleed into each other. Token cost stays flat **by design**: only root-level memories inject, area-tagged ones surface on demand via `memory_search`, and hard caps (200 lines / 25 KB / 500 files per scope) keep the prompt bounded no matter how much you remember.
+Memories are **tiered three ways — personal (user scope), per-workspace (project scope), per-session (v0.11)** — so cross-project preferences, team decisions, and session context never bleed into each other. Token cost stays flat **by design**: root-level memories always inject, area-tagged ones load once the session works in — or touches via filesystem/shell tool calls — that area, and hard caps (200 lines / 25 KB / 500 files per scope) keep the prompt bounded no matter how much you remember.
 
 ### Why this one
 
 - **30-second setup** — one command, zero config, works on first boot
 - **Two scopes** — personal preferences cross-project (`~/.dsh/memory`) + team decisions committed with the repo (`<root>/.dsh/memory`; git/SVN/Hg roots auto-detected)
-- **Lazy injection, CLAUDE.md-style** — project memories are tagged by sub-directory and only load when you work in that area; your token budget goes where you work
+- **Lazy injection, CLAUDE.md-style** — project memories are tagged by sub-directory and load when you work in that area or touch it via read/edit/write/grep/glob/shell calls (activation is monotone for the session); your token budget goes where you work
 - **Write rules built in** — strong-evidence gate ("will this matter in a month?"), same-topic saves update in place, secrets refused on sight
 - **Bounded by design** — 25KB guarded index, 200-line cap, 500 memories per scope: memory can never silently eat your context window
 - **Zero dependencies, pure files** — nothing to provision, nothing to break
@@ -137,9 +137,9 @@ Tool descriptions embed proactive-save guidance — preferences, decisions and k
 
 Portability test: still true in a different project? → user scope; only true here → project scope.
 
-**Path-tagged memories (v0.6, CLAUDE.md-style lazy injection)**: project-scope memories are automatically tagged with the sub-directory they were saved in. Root-level (untagged) memories always inject into the system prompt; path-tagged memories only inject when the session's working directory falls inside that path — "you see memories for where you work", exactly like nested CLAUDE.md files. The `path` parameter on `memory_save` also accepts an explicit override.
+**Path-tagged memories (v0.6, CLAUDE.md-style lazy injection)**: project-scope memories are automatically tagged with the sub-directory they were saved in. Root-level (untagged) memories always inject into the system prompt; a path tag injects when it names the session's effective working directory or one of its ancestors (up to the project root), or a directory the session has TOUCHED — read/edit/write/grep/glob/bash/pwsh tool calls — or one of its ancestors. Activation is monotone: touched areas stay injected until the session ends (v0.13), exactly like nested CLAUDE.md files. The `path` parameter on `memory_save` also accepts an explicit override.
 
-**Two-stage visibility (v0.7)**: nothing is silently hidden — the injected index always states how many path-tagged memories exist outside the current working area (e.g. `+3 more tagged to other areas of this project — memory_search surfaces them.`), so the model knows to search on demand and pays context cost only when needed.
+**Two-stage visibility (v0.7)**: nothing is silently hidden — the injected index always states how many path-tagged memories await in areas you haven't touched (e.g. `+3 more tagged to areas you haven't touched — memory_search surfaces them.`), so the model knows to search on demand and pays context cost only when needed.
 
 ## Layered scoping — how the project root is decided
 

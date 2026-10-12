@@ -1,7 +1,7 @@
 {
   "name": "@fooxe/dsh-memory",
   "description": "Hierarchical Claude Code-style persistent memory for DeepSeek Harness: user + project (git-shared) scopes, session-start auto-injection, MEMORY.md index guards. Pure files, zero dependencies.",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "publishConfig": {
     "access": "public"
   },
@@ -63,7 +63,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && npm run build:client",
-    "test": "node --test tests/basic.test.mjs tests/smoke.plugin.mjs tests/detection.test.mjs tests/pathedge.test.mjs tests/atomic.test.mjs tests/anchorless.test.mjs",
+    "test": "node --test tests/basic.test.mjs tests/smoke.plugin.mjs tests/detection.test.mjs tests/pathedge.test.mjs tests/atomic.test.mjs tests/anchorless.test.mjs tests/touch.test.mjs tests/host.real.mjs",
     "build:client": "tsdown"
   },
   "engines": {
