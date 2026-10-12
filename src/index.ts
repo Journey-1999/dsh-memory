@@ -585,7 +585,18 @@ function projectBasesFor(exec: unknown): string[] {
  * Restricted BFS from each known workspace root: depth-capped, skipping
  * vendor/build directories, so the panel lists them without any registry.
  */
-function findNestedScopes(root: string, maxDepth = 3): string[] {
+const nestedScopesCache = new Map<string, { at: number, value: string[] }>()
+const NESTED_SCOPES_TTL_MS = 5_000
+
+/**
+ * Discover manually-created nested memory scopes (PR5/C12): restricted BFS
+ * from each known workspace root — depth-capped, skipping vendor dirs, now
+ * ASYNC (the panel GET never blocks the event loop) behind a 5s TTL cache
+ * (the client re-fetches after every save; the walk only reruns on expiry).
+ */
+async function findNestedScopes(root: string, maxDepth = 3): Promise<string[]> {
+  const cached = nestedScopesCache.get(root)
+  if (cached !== undefined && Date.now() - cached.at < NESTED_SCOPES_TTL_MS) return cached.value
   const SKIP = new Set(['node_modules', '.git', '.svn', '.hg', 'dist', 'build', 'out', '.next', 'coverage', '.turbo', 'target', 'vendor'])
   const found: string[] = []
   let level: string[] = [root]
@@ -593,19 +604,24 @@ function findNestedScopes(root: string, maxDepth = 3): string[] {
   for (let depth = 0; depth < maxDepth && level.length > 0; depth++) {
     const next: string[] = []
     for (const dir of level) {
-      let names: string[] = []
-      try { names = readdirSync(dir, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name) } catch { continue }
-      for (const name of names) {
-        if (SKIP.has(name) || name.startsWith('.') && name !== '.dsh') continue
-        const child = path.join(dir, name)
+      let entries: Array<{ name: string, isDirectory: () => boolean }> = []
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true }) as unknown as Array<{ name: string, isDirectory: () => boolean }>
+      } catch { continue }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue
+        if (SKIP.has(entry.name) || entry.name.startsWith('.') && entry.name !== '.dsh') continue
+        const child = path.join(dir, entry.name)
         if (seen.has(child)) continue
         seen.add(child)
-        if (existsSync(path.join(child, '.dsh', 'memory'))) { found.push(child); continue } // nested scope: don't descend into it further
+        if (existsSync(path.join(child, '.dsh', 'memory'))) { found.push(child); continue } // nested scope: don't descend further
         next.push(child)
       }
     }
     level = next
   }
+  if (nestedScopesCache.size > 50) nestedScopesCache.clear()
+  nestedScopesCache.set(root, { at: Date.now(), value: found })
   return found
 }
 
@@ -781,7 +797,7 @@ async function buildPanelPayload(ctx: Context): Promise<Record<string, unknown>>
   // name each after the CLOSEST parent — the shortest relative path wins.
   const nestedNames = new Map<string, string>()
   for (const root of ordered) {
-    for (const nested of findNestedScopes(root)) {
+    for (const nested of await findNestedScopes(root)) {
       const rel = path.relative(root, nested) || path.basename(nested)
       const existing = nestedNames.get(nested)
       if (existing === undefined || rel.length < existing.length) nestedNames.set(nested, rel)
