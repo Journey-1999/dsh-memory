@@ -73,10 +73,15 @@ test('$HOME 护栏：dotfiles 场景免疫（~/.git 不会污染 home 桶）', a
   assert.equal(r.source, 'cwd')
 })
 
-test('护栏目录本身（home 与 /tmp）→ 无项目作用域', async () => {
+test('护栏目录本身（home 与 tmpdir）→ 无项目作用域', async () => {
   const t = await mk()
   const home = path.join(t, 'home')
   await fs.mkdir(home, { recursive: true })
   assert.equal(resolveProjectScope(home, { homeDir: home }).dir, undefined)
-  assert.equal(resolveProjectScope('/tmp', { homeDir: '/nonexistent' }).source, 'none')
+  // N8: os.tmpdir() is the portable guard target — a literal '/tmp' on Windows
+  // resolves to a plain '<drive>:\tmp' that the guard correctly does NOT block
+  assert.equal(resolveProjectScope(os.tmpdir(), { homeDir: '/nonexistent' }).source, 'none')
+  if (process.platform !== 'win32') {
+    assert.equal(resolveProjectScope('/tmp', { homeDir: '/nonexistent' }).source, 'none')
+  }
 })

@@ -138,8 +138,7 @@ test('P1 数据桥：GET /dsh-memory/api/v1/list 返回双域 JSON', async () =>
   assert.equal(route.kind, 'exact')
   let body = ''
   const res = { writeHead: () => {}, end: s => { body = s } }
-  route.handler({}, res)
-  for (let i = 0; i < 50 && body === ''; i++) await new Promise(resolve => setTimeout(resolve, 10)) // C12: real async IO in the walk needs real time, not just ticks
+  await route.handler({}, res)
   const data = JSON.parse(body)
   assert.ok(data.scopes && typeof data.scopes.user === 'object', '应有 user 域')
   assert.ok(Array.isArray(data.scopes.projects), 'P2: projects 应为工作区数组')
@@ -158,7 +157,6 @@ const postSave = async body => {
   let status = 0, resBody = ''
   const res = { writeHead: s => { status = s }, end: s => { resBody = s } }
   await route.handler(req, res)
-  for (let i = 0; i < 50 && resBody === ''; i++) await new Promise(r => setTimeout(r, 10))
   return { status, data: resBody === '' ? null : JSON.parse(resBody) }
 }
 
@@ -187,8 +185,7 @@ test('P2 枚举：POST 写已知工作区 + 无记忆工作区被过滤', async 
   const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/list')
   let body = ''
   const res = { writeHead: () => {}, end: s => { body = s } }
-  route.handler({}, res)
-  for (let i = 0; i < 50 && body === ''; i++) await new Promise(r => setTimeout(r, 10))
+  await route.handler({}, res)
   const data = JSON.parse(body)
   const roots = data.scopes.projects.map(p => p.root)
   assert.ok(roots.includes(fakeWs), '已写入的假工作区应在列表')
@@ -205,7 +202,6 @@ test('P2.1 POST /delete：删除单条 → 文件消失 + 索引行移除', asyn
   let status = 0, resBody = ''
   const res = { writeHead: s => { status = s }, end: s => { resBody = s } }
   await route.handler(req, res)
-  for (let i = 0; i < 50 && resBody === ''; i++) await new Promise(r => setTimeout(r, 10))
   assert.equal(status, 200)
   assert.equal(JSON.parse(resBody).deleted, id)
   const { access } = await import('node:fs/promises')
@@ -220,7 +216,6 @@ test('P2.1 POST /delete：恶意 id（路径穿越）被拒', async () => {
   let status = 0, resBody = ''
   const res = { writeHead: s => { status = s }, end: s => { resBody = s } }
   await route.handler(req, res)
-  for (let i = 0; i < 50 && resBody === ''; i++) await new Promise(r => setTimeout(r, 10))
   assert.equal(status, 400)
   assert.match(JSON.parse(resBody).error, /invalid id/)
 })
@@ -233,7 +228,6 @@ test('P2.2 修复回归：面板 id 带 .md 后缀也能删除（真实 bug 场�
   let status = 0, resBody = ''
   const res = { writeHead: s => { status = s }, end: s => { resBody = s } }
   await route.handler(req, res)
-  for (let i = 0; i < 50 && resBody === ''; i++) await new Promise(r => setTimeout(r, 10))
   assert.equal(status, 200, `带 .md 的 id 应可删（面板真实场景），body=${resBody}`)
 })
 
@@ -247,7 +241,6 @@ test('P2.2 read + update：编辑单条记忆端到端', async () => {
     let status = 0, resBody = ''
     const res = { writeHead: s => { status = s }, end: s => { resBody = s } }
     await route.handler(req, res)
-    for (let i = 0; i < 50 && resBody === ''; i++) await new Promise(r => setTimeout(r, 10))
     return { status, data: JSON.parse(resBody) }
   }
   const read = await call('/dsh-memory/api/v1/read', { scope: 'user', id })
@@ -277,8 +270,7 @@ test('P2.3 手动嵌套作用域：子文件夹里的 .dsh/memory 被发现并�
   const route = webRoutes.find(r => r.path === '/dsh-memory/api/v1/list')
   let body = ''
   const res = { writeHead: () => {}, end: s => { body = s } }
-  route.handler({}, res)
-  for (let i = 0; i < 50 && body === ''; i++) await new Promise(r => setTimeout(r, 10))
+  await route.handler({}, res)
   const data = JSON.parse(body)
   const nestedGroup = (data.scopes.projects ?? []).find(p => p.root === path.join(fakeWs, 'sub'))
   assert.ok(nestedGroup, `嵌套作用域应出现在列表: ${JSON.stringify((data.scopes.projects ?? []).map(p => p.root))}`)
@@ -368,8 +360,7 @@ test('v0.11.1 review 缺口①：会话保存 → 账本记录 → 面板可见�
   assert.ok(ledger.workspaces.includes(ws), '账本应含会话工作区')
   const route = webRoutes.find(rr => rr.path === '/dsh-memory/api/v1/list')
   let body = ''
-  route.handler({}, { writeHead: () => {}, end: s => { body = s } })
-  for (let i = 0; i < 50 && body === ''; i++) await new Promise(resolve => setTimeout(resolve, 10))
+  await route.handler({}, { writeHead: () => {}, end: s => { body = s } })
   const roots = JSON.parse(body).scopes.projects.map(p => p.root)
   assert.ok(roots.includes(ws), '面板应枚举出会话写入的工作区')
 })
@@ -406,8 +397,7 @@ test('v0.11.2 空态显示：目录存在但无记忆的工作区也列出（引
   wf(path.join(tmp, 'workspaces.json'), JSON.stringify({ workspaces: [emptyWs] }), 'utf8')
   const route = webRoutes.find(rr => rr.path === '/dsh-memory/api/v1/list')
   let body = ''
-  route.handler({}, { writeHead: () => {}, end: s => { body = s } })
-  for (let i = 0; i < 50 && body === ''; i++) await new Promise(resolve => setTimeout(resolve, 10))
+  await route.handler({}, { writeHead: () => {}, end: s => { body = s } })
   const group = JSON.parse(body).scopes.projects.find(p => p.root === emptyWs)
   assert.ok(group, '空工作区应显示（空态）')
   assert.equal(group.entries.length, 0, '条目为空')
@@ -433,8 +423,7 @@ test('v0.12.0 B5：索引外的记忆文件在面板可见（unindexed）', asyn
   writeFileSync(path.join(orphansDir, '20261012-000000-orphan-memory.md'), '---\nid: orphan\nscope: project\npath: \nsaved_at: 2026-10-12T00:00:00.000Z\ntags: \n---\n\n# Orphan memory\n\nNot in the index (beyond cap).\n')
   const route = webRoutes.find(rr => rr.path === '/dsh-memory/api/v1/list')
   let body = ''
-  route.handler({}, { writeHead: () => {}, end: s => { body = s } })
-  for (let i = 0; i < 50 && body === ''; i++) await new Promise(resolve => setTimeout(resolve, 10))
+  await route.handler({}, { writeHead: () => {}, end: s => { body = s } })
   const group = JSON.parse(body).scopes.projects.find(p => p.serviceAnchor === true)
   const orphan = (group.entries ?? []).find(e => e.id === '20261012-000000-orphan-memory')
   assert.ok(orphan, '索引外文件应作为 unindexed 条目出现')
@@ -464,6 +453,5 @@ test('v0.12.0 A1：跨站来源被 403 拒绝，同源放行', async () => {
   await route.handler(
     { headers: { origin: 'http://127.0.0.1:3000', host: '127.0.0.1:3000' }, async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ scope: 'user', title: 'A1 trusted', content: 'same-origin passes' })) } },
     { writeHead: s => { status2 = s }, end: s => { body2 = s } })
-  for (let i = 0; i < 50 && body2 === ''; i++) await new Promise(r => setTimeout(r, 10))
   assert.equal(status2, 200, '同源应放行')
 })

@@ -233,7 +233,6 @@ function EntryList(props: { entries: PanelEntry[], query: string, target: SaveTa
   )
 }
 
-/** Inline edit form: fetches the full text on demand, saves via /update. */
 /** One form, two modes — add (empty, /save) and edit (prefilled via /read, /update). Identical layout and size. */
 function MemoryForm(props: { target: SaveTarget, initial?: PanelEntry, onDone: () => void }): ReactElement {
   const editing = props.initial !== undefined && props.initial.id !== undefined
@@ -252,11 +251,18 @@ function MemoryForm(props: { target: SaveTarget, initial?: PanelEntry, onDone: (
       body: JSON.stringify({ scope: props.target.scope, workspace: props.target.workspace, id: props.initial!.id }),
     })
       .then(async r => {
-        const d = r.json() as Promise<{ ok?: boolean, error?: string, content?: string }>
+        const d = r.json() as Promise<{ ok?: boolean, error?: string, content?: string, title?: string, path?: string, tags?: string[] }>
         if (!r.ok || (await d).ok !== true) throw new Error((await d as { error?: string }).error ?? `HTTP ${r.status}`)
         return d
       })
-      .then(d => { setContent(d.content ?? '') })
+      .then(d => {
+        // N5: the file is authoritative — backfill title/path/tags too, else a
+        // hand-edited file would be overwritten with stale index-row values on save
+        setContent(d.content ?? '')
+        if (typeof d.title === 'string' && d.title !== '') setTitle(d.title)
+        if (typeof d.path === 'string') setMemPath(d.path)
+        if (Array.isArray(d.tags)) setTags(d.tags.join(', '))
+      })
       .catch(err => { setFormError(String(err)) })
       .finally(() => { setLoading(false) })
   }, [])
@@ -269,8 +275,10 @@ function MemoryForm(props: { target: SaveTarget, initial?: PanelEntry, onDone: (
     fetch(editing ? '/dsh-memory/api/v1/update' : '/dsh-memory/api/v1/save', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
+      // N4: edit sends '' (not undefined) when the field is empty — the server
+      // treats an explicit '' as "clear the path tag"; undefined keeps the old one
       body: JSON.stringify(editing
-        ? { scope: props.target.scope, workspace: props.target.workspace, id: props.initial!.id, title, content, tags: tagList, path: memPath.trim() === '' ? undefined : memPath.trim() }
+        ? { scope: props.target.scope, workspace: props.target.workspace, id: props.initial!.id, title, content, tags: tagList, path: memPath.trim() }
         : { scope: props.target.scope, workspace: props.target.workspace, title, content, tags: tagList, path: memPath.trim() === '' ? undefined : memPath.trim() }),
     })
       .then(async r => {

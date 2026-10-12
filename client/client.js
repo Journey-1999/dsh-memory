@@ -313,7 +313,6 @@ window.__ModuleLoader__.load({
 				}, deleting === e.id ? "…" : "×") : null), (0, react.createElement)("div", { style: S.muted }, e.date !== "" ? `${e.date} — ` : "", e.excerpt)));
 			}));
 		}
-		/** Inline edit form: fetches the full text on demand, saves via /update. */
 		/** One form, two modes — add (empty, /save) and edit (prefilled via /read, /update). Identical layout and size. */
 		function MemoryForm(props) {
 			const editing = props.initial !== void 0 && props.initial.id !== void 0;
@@ -340,6 +339,9 @@ window.__ModuleLoader__.load({
 					return d;
 				}).then((d) => {
 					setContent(d.content ?? "");
+					if (typeof d.title === "string" && d.title !== "") setTitle(d.title);
+					if (typeof d.path === "string") setMemPath(d.path);
+					if (Array.isArray(d.tags)) setTags(d.tags.join(", "));
 				}).catch((err) => {
 					setFormError(String(err));
 				}).finally(() => {
@@ -362,7 +364,7 @@ window.__ModuleLoader__.load({
 						title,
 						content,
 						tags: tagList,
-						path: memPath.trim() === "" ? void 0 : memPath.trim()
+						path: memPath.trim()
 					} : {
 						scope: props.target.scope,
 						workspace: props.target.workspace,
