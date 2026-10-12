@@ -92,15 +92,20 @@ export interface ProjectResolution { dir?: string, source: 'env' | 'walk' | 'cwd
  * The host workspaceRegistry refinement runs separately in apply() because
  * it is an async host service.
  */
+/** B4: shared guarded-directory predicate — home, ANY filesystem root ('/', 'C:\', …),
+ * and the tmp dirs. One copy for every consumer (scope walk, env override,
+ * workspace-registry refinement) — divergent copies let platform gaps creep back in. */
+function isGuardedDir(p: string, home: string): boolean {
+  const r = path.resolve(p)
+  if (r === home) return true
+  if (path.parse(r).root === r) return true // any filesystem root ('/', 'C:\', …) — literal '/tmp' misses drive roots on Windows
+  const tmp = path.resolve(os.tmpdir())
+  return r === tmp || r === '/tmp' || r === '/private/tmp'
+}
+
 export function resolveProjectScope(startDir: string = process.cwd(), opts: { homeDir?: string } = {}): ProjectResolution {
   const home = path.resolve(opts.homeDir ?? os.homedir())
-  const guarded = (d: string): boolean => {
-    const r = path.resolve(d)
-    if (r === home) return true
-    if (path.parse(r).root === r) return true // B4: any filesystem root ('/', 'C:\', …) — literal '/tmp' misses drive roots on Windows
-    const tmp = path.resolve(os.tmpdir())
-    return r === tmp || r === '/tmp' || r === '/private/tmp'
-  }
+  const guarded = (d: string): boolean => isGuardedDir(d, home)
   const envDir = process.env.DSH_MEMORY_PROJECT_DIR
   if (envDir !== undefined && envDir.trim() !== '' && path.isAbsolute(envDir) && !guarded(envDir)) {
     return { dir: path.join(path.resolve(envDir), MARKER_DIR), source: 'env' }
@@ -154,10 +159,9 @@ async function refineWithWorkspaceRegistry(ctx: Context): Promise<void> {
       }
     }
     if (best !== undefined) {
-      const home = path.resolve(os.homedir())
-      const r = path.resolve(best)
-      const isGuarded = r === home || r === '/' || r === '/tmp' || r === '/private/tmp'
-      if (!isGuarded) {
+      // B4: the SAME shared guard as the scope walk — a registry-supplied drive
+      // root ('E:\') or tmp dir is no more a durable project boundary here
+      if (!isGuardedDir(best, path.resolve(os.homedir()))) {
         PROJECT_DIR = path.join(best, MARKER_DIR)
         projectDirSource = 'workspace'
       }
@@ -532,6 +536,11 @@ async function handlePanelUpdate(ctx: Context, request: IncomingMessage, respons
     const newTitle = title ?? fm[2]!
     const newContent = content ?? fm[3]!
     const newTags = (tags ?? (/^tags: (.*)$/m.exec(fm[1]!)?.[1] ?? '').split(',').map(s => s.trim()).filter(s => s !== '')).map(sanitizeTag).filter(t => t !== '')
+    // C5: the SAME secret scan as the save path — update must not be the bypass
+    if (SECRET_PATTERN.test(newTitle) || SECRET_PATTERN.test(newContent)) {
+      reply(400, { ok: false, error: 'refused: content looks like a credential or private key — never save secrets' })
+      return
+    }
     const now = new Date()
     const date = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`
     const header = `---\nid: ${rawId}\nscope: ${oldScope}\npath: ${oldPath}\nsaved_at: ${now.toISOString()}\ntags: ${newTags.join(', ')}\n---\n\n# ${newTitle}\n\n`
@@ -579,12 +588,6 @@ function projectBasesFor(exec: unknown): string[] {
   return bases
 }
 
-/**
- * Discover manually-created nested memory scopes (a .dsh/memory copied into a
- * sub-folder — an intentional sub-project scope per the resolution chain).
- * Restricted BFS from each known workspace root: depth-capped, skipping
- * vendor/build directories, so the panel lists them without any registry.
- */
 const nestedScopesCache = new Map<string, { at: number, value: string[] }>()
 const NESTED_SCOPES_TTL_MS = 5_000
 
@@ -668,7 +671,6 @@ const SAVE_DESCRIPTION = [
 
 const SEARCH_DESCRIPTION = 'Search saved memories by keyword (case-insensitive substring match across titles, tags, and content). Call this when prior context, user preferences, or earlier decisions may be relevant to the current task — before re-asking the user.'
 
-/** Narrow structural type for the host webServer route service (P1 panel data bridge). */
 /**
  * Panel-endpoint origin gate (A1): the host does no auth on plugin routes
  * (gzip -> pathname -> handler), and the panel has no CORS headers — a
@@ -677,8 +679,11 @@ const SEARCH_DESCRIPTION = 'Search saved memories by keyword (case-insensitive s
  * prompt. Modern browsers are stopped by Sec-Fetch-Site + Origin-vs-Host;
  * DNS rebinding is stopped by the Host allow-list (localhost variants or a
  * bare IP — LAN access stays legal). Local clients without these headers pass.
+ * Method policing also lives here (N3): each route declares its expected
+ * method; an absent method (bare local client) passes like absent headers.
  */
-function isTrustedPanelRequest(request: IncomingMessage): boolean {
+function isTrustedPanelRequest(request: IncomingMessage, expectedMethod?: 'GET' | 'POST'): boolean {
+  if (expectedMethod !== undefined && request.method !== undefined && request.method !== expectedMethod) return false
   const h = request.headers ?? {}
   const site = h['sec-fetch-site']
   if (typeof site === 'string' && site !== 'same-origin' && site !== 'none') return false
@@ -703,6 +708,7 @@ function refuseCrossOrigin(response: ServerResponse): void {
   response.end(JSON.stringify({ ok: false, error: 'cross-origin request refused' }))
 }
 
+/** Narrow structural type for the host webServer route service (P1 panel data bridge). */
 interface WebServerRouteService {
   register(route: { kind: 'exact' | 'prefix', path: string, handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void> }): () => void
 }
@@ -1065,7 +1071,7 @@ export async function apply(ctx: Context): Promise<void> {
         for (const f of files) {
           if (matches.length >= limit) break
           if (f.toLowerCase().includes(lower)) {
-            matches.push({ scope, id: f.replace(/\.md$/, ''), title: f.replace(/\.md$/, ''), excerpt: '(id match)' })
+            matches.push({ scope, id: f.replace(/\.md$/, ''), title: f.replace(/\.md$/, ''), excerpt: '(id match)', workspace: scope === 'project' ? path.resolve(base, '..', '..') : undefined }) // B2: same entry shape as the content branch
             continue
           }
           const text = await fs.readFile(path.join(dir, f), 'utf8').catch(() => '')
@@ -1179,7 +1185,7 @@ export async function apply(ctx: Context): Promise<void> {
       kind: 'exact', // A2: host routes are {kind,path,handler}; method policing lives in the origin gate
       path: '/dsh-memory/api/v1/list',
       handler: async (request, response) => {
-        if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
+        if (!isTrustedPanelRequest(request, 'GET')) { refuseCrossOrigin(response); return }
         try {
           const payload = await buildPanelPayload(ctx)
           response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
@@ -1194,7 +1200,7 @@ export async function apply(ctx: Context): Promise<void> {
       kind: 'exact', // A2
       path: '/dsh-memory/api/v1/save',
       handler: async (request, response) => {
-        if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
+        if (!isTrustedPanelRequest(request, 'POST')) { refuseCrossOrigin(response); return }
         await handlePanelSave(ctx, request, response)
       },
     })
@@ -1202,7 +1208,7 @@ export async function apply(ctx: Context): Promise<void> {
       kind: 'exact', // A2
       path: '/dsh-memory/api/v1/delete',
       handler: async (request, response) => {
-        if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
+        if (!isTrustedPanelRequest(request, 'POST')) { refuseCrossOrigin(response); return }
         await handlePanelDelete(ctx, request, response)
       },
     })
@@ -1210,7 +1216,7 @@ export async function apply(ctx: Context): Promise<void> {
       kind: 'exact', // A2
       path: '/dsh-memory/api/v1/update',
       handler: async (request, response) => {
-        if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
+        if (!isTrustedPanelRequest(request, 'POST')) { refuseCrossOrigin(response); return }
         await handlePanelUpdate(ctx, request, response)
       },
     })
@@ -1218,7 +1224,7 @@ export async function apply(ctx: Context): Promise<void> {
       kind: 'exact', // A2
       path: '/dsh-memory/api/v1/read',
       handler: async (request, response) => {
-        if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
+        if (!isTrustedPanelRequest(request, 'POST')) { refuseCrossOrigin(response); return }
         await handlePanelRead(ctx, request, response)
       },
     })

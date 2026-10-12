@@ -37,7 +37,7 @@ test('P0 并发 save：索引文件永不损坏', async () => {
   assert.ok(idx.endsWith('\n'), '文件尾完整')
   const lines = idx.split('\n').filter(l => l.startsWith('- '))
   assert.ok(lines.length >= 1 && lines.length <= 2,
-    `行数 ${lines.length} 应 ∈ [1,2]（原子写保完整；并发丢更新已知限制：并发丢更新（文件完整性有原子写保证））`)
+    `行数 ${lines.length} 应 ∈ [1,2]（原子写保证文件完整；并发丢更新为已知限制）`)
 })
 
 test('P0 孤儿 tmp：不影响写入、自身 tmp 被 rename 消费', async () => {
