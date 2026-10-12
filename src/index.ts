@@ -233,23 +233,10 @@ async function writeIndexGuarded(base: string, lines: string[]): Promise<number>
     kept = kept.slice(0, kept.length - 1) // drop oldest (last) entries
   }
   await ensureDirs(base)
-  // Atomic on disk (P0): write a sibling tmp file, then rename over the target,
-  // so a crash mid-write can never leave a half-written MEMORY.md — the
-  // prerequisite for a concurrent visual editor. This guarantees file
-  // integrity, not last-writer-wins semantics (known limitation — a concurrent writer's update can be lost; the index cap prunes the damage): the read-modify-write race
-  // (lost update) is deliberately left to the P2 optimistic lock. On Windows
-  // a transiently-open target can fail the rename with EPERM; retry once.
-  const target = indexFileOf(base)
-  // unique tmp suffix: concurrent writers must never share a tmp path (a shared
-  // name lets one writer's cleanup delete another's staged file mid-rename)
-  const tmp = `${target}.${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.tmp`
-  await fs.writeFile(tmp, INDEX_HEADER + kept.join('\n') + '\n', 'utf8')
-  try {
-    await fs.rename(tmp, target)
-  } catch {
-    await new Promise(resolve => setTimeout(resolve, 50)) // Windows EPERM: target briefly open
-    await fs.rename(tmp, target)
-  }
+  // R6 (PR1): single shared atomic-write implementation — file integrity
+  // guaranteed; last-writer-wins between concurrent writers is a known
+  // limitation (the index cap prunes the damage).
+  await atomicWriteFile(indexFileOf(base), INDEX_HEADER + kept.join('\n') + '\n')
   return kept.length
 }
 
@@ -413,11 +400,65 @@ async function knownWorkspaces(ctx: Context): Promise<string[]> {
  * arbitrary path is rejected, so the browser can never use this API as a
  * general-purpose file writer.
  */
-async function handlePanelSave(ctx: Context, request: IncomingMessage, response: ServerResponse): Promise<void> {
-  const reply = (status: number, body: unknown): void => {
+type PanelReply = (status: number, body: unknown) => void
+
+function panelReply(response: ServerResponse): PanelReply {
+  return (status, body) => {
     response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
     response.end(JSON.stringify(body))
   }
+}
+
+/** Shared body reader (PR1): size-capped, JSON-parsed; replies and returns undefined on failure. */
+async function readPanelBody(request: IncomingMessage, maxBytes: number, reply: PanelReply): Promise<Record<string, unknown> | undefined> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of request) {
+    size += (chunk as Buffer).length
+    if (size > maxBytes) { reply(413, { ok: false, error: 'body too large' }); return undefined }
+    chunks.push(chunk as Buffer)
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
+  } catch (e) {
+    reply(400, { ok: false, error: String((e as Error)?.message ?? e) })
+    return undefined
+  }
+}
+
+/** Shared id validation (PR1): strips a .md suffix, enforces the slug charset — no path traversal. */
+function panelIdOf(body: Record<string, unknown>, reply: PanelReply): string | undefined {
+  const id = String(body.id ?? '').replace(/\.md$/, '')
+  if (!/^[a-zA-Z0-9\u4e00-\u9fff_-]+$/.test(id)) { reply(400, { ok: false, error: 'invalid id' }); return undefined }
+  return id
+}
+
+/**
+ * Shared scope→base resolution (PR1): user / project-with-known-workspace /
+ * project-anchor. Always replies on failure, so callers can treat undefined
+ * as "handled".
+ */
+async function resolvePanelBase(ctx: Context, body: Record<string, unknown>, reply: PanelReply): Promise<string | undefined> {
+  if (body.scope === 'user') {
+    const b = scopeDir('user')
+    if (b === undefined) { reply(400, { ok: false, error: 'target scope unavailable' }); return undefined }
+    return b
+  }
+  if (body.scope === 'project') {
+    if (body.workspace !== undefined) {
+      const root = path.resolve(String(body.workspace))
+      if (!(await knownWorkspaces(ctx)).includes(root)) { reply(400, { ok: false, error: 'unknown workspace' }); return undefined }
+      return path.join(root, '.dsh', 'memory')
+    }
+    if (PROJECT_DIR === undefined) { reply(400, { ok: false, error: 'target scope unavailable' }); return undefined }
+    return PROJECT_DIR
+  }
+  reply(400, { ok: false, error: 'scope must be "user" or "project"' })
+  return undefined
+}
+
+async function handlePanelSave(ctx: Context, request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const reply = panelReply(response)
   try {
     const chunks: Buffer[] = []
     let size = 0
@@ -461,10 +502,7 @@ async function handlePanelSave(ctx: Context, request: IncomingMessage, response:
  * the workspace guard mirrors the save endpoint.
  */
 async function handlePanelDelete(ctx: Context, request: IncomingMessage, response: ServerResponse): Promise<void> {
-  const reply = (status: number, body: unknown): void => {
-    response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-    response.end(JSON.stringify(body))
-  }
+  const reply = panelReply(response)
   try {
     const chunks: Buffer[] = []
     for await (const chunk of request) {
@@ -506,10 +544,7 @@ async function handlePanelDelete(ctx: Context, request: IncomingMessage, respons
  * rebuilt index line. Only the given fields change; path tag and file name stay.
  */
 async function handlePanelUpdate(ctx: Context, request: IncomingMessage, response: ServerResponse): Promise<void> {
-  const reply = (status: number, body: unknown): void => {
-    response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-    response.end(JSON.stringify(body))
-  }
+  const reply = panelReply(response)
   try {
     const chunks: Buffer[] = []
     for await (const chunk of request) {
@@ -633,10 +668,7 @@ function findNestedScopes(root: string, maxDepth = 3): string[] {
  * original content is fetched on demand, one memory at a time.
  */
 async function handlePanelRead(ctx: Context, request: IncomingMessage, response: ServerResponse): Promise<void> {
-  const reply = (status: number, body: unknown): void => {
-    response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-    response.end(JSON.stringify(body))
-  }
+  const reply = panelReply(response)
   try {
     const chunks: Buffer[] = []
     for await (const chunk of request) {
@@ -1200,47 +1232,48 @@ export async function apply(ctx: Context): Promise<void> {
     webServer.register({
       kind: 'exact', // A2: host routes are {kind,path,handler}; method policing lives in the origin gate
       path: '/dsh-memory/api/v1/list',
-      handler: (request, response) => {
+      handler: async (request, response) => {
         if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
-        void buildPanelPayload(ctx).then(payload => {
+        try {
+          const payload = await buildPanelPayload(ctx)
           response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
           response.end(JSON.stringify(payload))
-        }).catch(() => {
+        } catch {
           response.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
           response.end(JSON.stringify({ error: 'panel payload failed' }))
-        })
+        }
       },
     })
     webServer.register({
       kind: 'exact', // A2
       path: '/dsh-memory/api/v1/save',
-      handler: (request, response) => {
+      handler: async (request, response) => {
         if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
-        void handlePanelSave(ctx, request, response)
+        await handlePanelSave(ctx, request, response)
       },
     })
     webServer.register({
       kind: 'exact', // A2
       path: '/dsh-memory/api/v1/delete',
-      handler: (request, response) => {
+      handler: async (request, response) => {
         if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
-        void handlePanelDelete(ctx, request, response)
+        await handlePanelDelete(ctx, request, response)
       },
     })
     webServer.register({
       kind: 'exact', // A2
       path: '/dsh-memory/api/v1/update',
-      handler: (request, response) => {
+      handler: async (request, response) => {
         if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
-        void handlePanelUpdate(ctx, request, response)
+        await handlePanelUpdate(ctx, request, response)
       },
     })
     webServer.register({
       kind: 'exact', // A2
       path: '/dsh-memory/api/v1/read',
-      handler: (request, response) => {
+      handler: async (request, response) => {
         if (!isTrustedPanelRequest(request)) { refuseCrossOrigin(response); return }
-        void handlePanelRead(ctx, request, response)
+        await handlePanelRead(ctx, request, response)
       },
     })
   })
