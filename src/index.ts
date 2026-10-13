@@ -1201,6 +1201,7 @@ function registerMemoryGuidance(ctx: Context): void {
       return '## Persistent memory (cross-session)\n'
         + sections.join('\n\n')
         + '\n\nUse memory_search / memory_read when prior context, user preferences, or earlier decisions may matter — before re-asking the user. '
+        + 'Memory is not proof of current behavior — for consequential claims, inspect the actual owning source. '
         + 'Proactively memory_save important new facts as they appear: personal preferences → scope "user"; project decisions/conventions → scope "project". Write rules: ask "will this still matter a month from now?" before saving (skip if unsure — noise costs more than gaps); same-topic saves update the existing memory in place; dated index lines show what is fresh. Never save secrets or transient details.'
     },
   })
