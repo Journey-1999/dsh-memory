@@ -90,6 +90,24 @@ test('T5 相对路径：触碰 frontend/src/x.ts 按有效 cwd 解析激活两�
     '相对路径应按会话有效 cwd 解析（不提前在 reducer 里解析）')
 })
 
+test('T8 目录型参数：grep/glob/pwsh 传目录 → 最深一级也激活（F1）', () => {
+  const evs = [
+    { type: 'tool/call', name: 'grep', arguments: { path: path.join(root, 'frontend', 'src') } },
+    { type: 'tool/call', name: 'glob', arguments: { path: path.join(root, 'frontend', 'src') } },
+    { type: 'tool/call', name: 'pwsh', arguments: { workdir: path.join(root, 'frontend', 'src') } },
+  ]
+  for (const ev of evs) {
+    const text = auto.text({ agent: agent(root, touchedViaFold([ev])) })
+    assert.ok(text.includes('Frontend area memory'), `${ev.name}: [frontend] 应注入`)
+    assert.ok(text.includes('Frontend src memory'), `${ev.name}: [frontend/src] 最深一级应注入`)
+  }
+  // 尾分隔符 + 相对目录路径
+  const sep = touchedViaFold([{ type: 'tool/call', name: 'glob', arguments: { path: path.join(root, 'frontend', 'src') + path.sep } }])
+  assert.ok(auto.text({ agent: agent(root, sep) }).includes('Frontend src memory'), '尾分隔符目录同样激活最深一级')
+  const rel = touchedViaFold([{ type: 'tool/call', name: 'grep', arguments: { path: 'frontend/src' } }])
+  assert.ok(auto.text({ agent: agent(root, rel) }).includes('Frontend src memory'), '相对目录路径按有效 cwd 解析')
+})
+
 test('T6 降级：宿主无 workingDirectory/sessionProjections → 回落 header.cwd 链式过滤', async () => {
   const sections2 = []
   const ctx2 = {
@@ -126,6 +144,40 @@ test('T7 保存侧：workingDirectory 有效 cwd ≠ 冻结 header.cwd → path 
   assert.equal(r.saved, true, `应保存成功: ${JSON.stringify(r)}`)
   const idx = await fs.readFile(path.join(root2, '.dsh', 'memory', 'MEMORY.md'), 'utf8')
   assert.ok(idx.includes('[backend/api]'), '标签应按 workingDirectory 的有效 cwd（backend/api），而非冻结 header.cwd（根）')
+})
+
+test('T9 检索侧：search/read/list 跟随 workingDirectory 有效 cwd（F2）', async () => {
+  delete process.env.DSH_MEMORY_PROJECT_DIR // T7 已删过一次，保留同一行防重排
+  const wsA = path.join(tmp, 'wsA'), wsB = path.join(tmp, 'wsB')
+  for (const w of [wsA, wsB]) {
+    mkdirSync(path.join(w, '.git'), { recursive: true })
+    mkdirSync(path.join(w, '.dsh', 'memory', 'memories'), { recursive: true })
+  }
+  writeFileSync(path.join(wsB, '.dsh', 'memory', 'memories', '20261013-000001-wsb-7f3a.md'),
+    `---\nid: 20261013-000001-wsb-7f3a\nscope: project\npath: \nsaved_at: 2026-10-13T00:00:00.000Z\ntags: \n---\n\n# wsB unique 7f3a convention\n\nwsB-7f3a-marker.\n`)
+  writeFileSync(path.join(wsB, '.dsh', 'memory', 'MEMORY.md'),
+    '# Memory Index\n\n- [wsB unique 7f3a convention](memories/20261013-000001-wsb-7f3a.md) — wsB-7f3a-marker. (2026-10-13)\n')
+  const tools2 = []
+  const ctx2 = {
+    tools: { register: t => tools2.push(t) },
+    systemPrompt: { section: () => {}, getSectionOrder: () => 42 },
+    inject: () => {},
+    get: name => name === 'workingDirectory' ? { get: s => s.__cwd } : undefined,
+  }
+  await plugin.apply(ctx2)
+  const search = tools2.find(t => t.name === 'memory_search')
+  const read = tools2.find(t => t.name === 'memory_read')
+  const list = tools2.find(t => t.name === 'memory_list')
+  const exec = {
+    signal: new AbortController().signal,
+    agent: { session: { header: { cwd: wsA }, __cwd: wsB } }, // 冻结=A，有效=B
+  }
+  const r = await search.execute({ query: 'wsB-7f3a' }, exec)
+  assert.ok(r.matches?.some(m => m.id === '20261013-000001-wsb-7f3a'), `search 应命中 wsB 记忆（跟随有效 cwd）: ${JSON.stringify(r)}`)
+  const full = await read.execute({ id: '20261013-000001-wsb-7f3a' }, exec)
+  assert.equal(full.id, '20261013-000001-wsb-7f3a', 'read 应读到 wsB 记忆')
+  const out = await list.execute({}, exec)
+  assert.ok(out.project?.entries?.some(l => l.includes('wsB unique 7f3a convention')), 'list 的 project 桶应含 wsB 记忆')
 })
 
 test('fold 卫生：无关事件同引用；路径去重；200 上限丢最旧', () => {

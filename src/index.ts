@@ -578,9 +578,14 @@ async function recordSessionWorkspace(root: string): Promise<void> {
  * then the service-anchor bucket as fallback so pre-session-era memories
  * stay reachable. Deduped; single-element in single-workspace hosts.
  */
-function projectBasesFor(exec: unknown): string[] {
+function projectBasesFor(ctx: Context, exec: unknown): string[] {
   const bases: string[] = []
-  const sessionCwd = sessionCwdOfAgent((exec as { agent?: unknown } | undefined)?.agent)
+  const agent = (exec as { agent?: unknown } | undefined)?.agent
+  // retrieval tools must follow the SAME effective cwd as injection and
+  // memory_save — workingDirectory first, frozen header.cwd as fallback —
+  // or a cross-workspace cd saves into the new bucket but keeps searching
+  // the old one.
+  const sessionCwd = workingDirectoryCwd(ctx, agent) ?? sessionCwdOfAgent(agent)
   const sessionBase = sessionCwd === undefined ? undefined : projectBaseFor(sessionCwd)
   const anchorBase = scopeDir('project')
   if (sessionBase !== undefined) bases.push(sessionBase)
@@ -1107,7 +1112,14 @@ function registerMemoryGuidance(ctx: Context): void {
                 if (typeof raw !== 'string' || raw.trim() === '') continue
                 // relative paths resolve against the session's effective cwd;
                 // directories outside this workspace's root activate nothing
-                dirTagChain(projRoot, path.dirname(path.isAbsolute(raw) ? raw : path.resolve(sessionCwd, raw)), activeTags)
+                const abs = path.isAbsolute(raw) ? raw : path.resolve(sessionCwd, raw)
+                // fold stores raw argument paths: read/edit/write/grep(file) hand us a FILE,
+                // glob/grep(dir)/pwsh hand us a DIRECTORY. dirname alone strips the deepest
+                // tag level for directory-shaped args; raw alone adds one unreachable tag
+                // for file-shaped args (cwd is always a directory, so no saved memory can
+                // ever carry a file-shaped tag). Feeding both covers every arg shape.
+                dirTagChain(projRoot, abs, activeTags)
+                dirTagChain(projRoot, path.dirname(abs), activeTags)
               }
             }
           }
@@ -1216,13 +1228,13 @@ export async function apply(ctx: Context): Promise<void> {
       if (!q) return simpleError('invalid_input', 'query must be non-empty.')
       const limit = Math.min(Math.max(Math.trunc(args.limit ?? DEFAULT_SEARCH_LIMIT), 1), 20)
       const lower = q.toLowerCase()
-      const scopes: Array<'user' | 'project'> = args.scope === undefined ? (projectBasesFor(exec).length > 0 ? ['user', 'project'] : ['user']) : [args.scope] // BUG B fix: admission follows session-resolved buckets
+      const scopes: Array<'user' | 'project'> = args.scope === undefined ? (projectBasesFor(ctx, exec).length > 0 ? ['user', 'project'] : ['user']) : [args.scope] // BUG B fix: admission follows session-resolved buckets
       const matches: Array<{ scope: string, id: string, title: string, excerpt: string, workspace?: string }> = []
       for (const scope of scopes) {
         // v0.11.1: the project scope follows the calling session's workspace
         // first, the service anchor second — the injection's "memory_search
         // surfaces them" promise holds in multi-workspace web hosts.
-        const bases = scope === 'project' ? projectBasesFor(exec) : [scopeDir(scope)].filter((b): b is string => b !== undefined)
+        const bases = scope === 'project' ? projectBasesFor(ctx, exec) : [scopeDir(scope)].filter((b): b is string => b !== undefined)
         for (const base of bases) {
         const dir = memoryDirOf(base)
         const files = (await fs.readdir(dir).catch(() => [] as string[])).filter(f => f.endsWith('.md')).sort().reverse()
@@ -1267,7 +1279,7 @@ export async function apply(ctx: Context): Promise<void> {
       for (const scope of ['project', 'user'] as const) {
         // v0.11.1: project reads try the calling session's workspace first,
         // then the service anchor — old memories stay readable.
-        const bases = scope === 'project' ? projectBasesFor(exec) : [scopeDir(scope)].filter((b): b is string => b !== undefined)
+        const bases = scope === 'project' ? projectBasesFor(ctx, exec) : [scopeDir(scope)].filter((b): b is string => b !== undefined)
         for (const base of bases) {
         const file = path.join(memoryDirOf(base), `${safe}.md`)
         try {
@@ -1308,11 +1320,11 @@ export async function apply(ctx: Context): Promise<void> {
       if (exec.signal.aborted) return simpleError('aborted', 'List aborted.')
       const limit = Math.min(Math.max(Math.trunc(args.limit ?? DEFAULT_SEARCH_LIMIT), 1), 50)
       const out: Record<string, { total: number, truncated: boolean, entries: string[] }> = {}
-      const listScopes: Array<'user' | 'project'> = projectBasesFor(exec).length > 0 ? ['user', 'project'] : ['user'] // BUG B fix
+      const listScopes: Array<'user' | 'project'> = projectBasesFor(ctx, exec).length > 0 ? ['user', 'project'] : ['user'] // BUG B fix
       for (const scope of listScopes) {
         // v0.11.1: project lists merge the session workspace and the service
         // anchor (session first, id-deduped) so both stay visible.
-        const bases = scope === 'project' ? projectBasesFor(exec) : [scopeDir(scope)].filter((b): b is string => b !== undefined)
+        const bases = scope === 'project' ? projectBasesFor(ctx, exec) : [scopeDir(scope)].filter((b): b is string => b !== undefined)
         let all: string[] = []
         const seenIds = new Set<string>()
         for (const base of bases) {
