@@ -108,6 +108,29 @@ test('T8 目录型参数：grep/glob/pwsh 传目录 → 最深一级也激活（
   assert.ok(auto.text({ agent: agent(root, rel) }).includes('Frontend src memory'), '相对目录路径按有效 cwd 解析')
 })
 
+test('P1 丢标签：cd 前触碰的相对路径不被组装时 cwd 重解析（单调性保持）', () => {
+  // 会话冻结 cwd = root；cd 进 frontend 后触碰相对 "src"（真实 = frontend/src）；再 cd 回 root
+  const evs = [
+    { type: 'tool/call', name: 'working_directory', arguments: { cd: path.join(root, 'frontend') } },
+    { type: 'tool/call', name: 'grep', arguments: { path: 'src' } },
+    { type: 'tool/call', name: 'working_directory', arguments: { cd: root } },
+  ]
+  const text = auto.text({ agent: agent(root, touchedViaFold(evs)) })
+  assert.ok(text.includes('Frontend src memory'), '触碰时刻 cwd=frontend → "src"=frontend/src；cd 回 root 后仍应注入（触碰保持到会话结束）')
+})
+
+test('P2 串桶：backend 下触碰的 "src" 在 cd 到 frontend 后不得重解析成 frontend/src', () => {
+  // 会话冻结 cwd = <root>/backend；触碰相对 "src"（真实 = backend/src）；cd 到 frontend
+  const evs = [
+    { type: 'tool/call', name: 'grep', arguments: { path: 'src' } },
+    { type: 'tool/call', name: 'working_directory', arguments: { cd: path.join(root, 'frontend') } },
+  ]
+  const agentB = { session: { header: { cwd: path.join(root, 'backend') }, __cwd: path.join(root, 'frontend'), __touched: touchedViaFold(evs) } }
+  const text = auto.text({ agent: agentB })
+  assert.ok(!text.includes('Frontend src memory'), '从未触碰 frontend/src——"src" 不得在组装时刻被重解析成 frontend/src（串桶）')
+  assert.ok(text.includes('Backend memory'), 'backend/src 的祖先标签 [backend] 应因触碰激活')
+})
+
 test('T6 降级：宿主无 workingDirectory/sessionProjections → 回落 header.cwd 链式过滤', async () => {
   const sections2 = []
   const ctx2 = {
@@ -202,4 +225,19 @@ test('fold 卫生：无关事件同引用；路径去重；200 上限丢最旧',
   assert.throws(() => def.stateSchema.parse('not-an-array'))
   assert.throws(() => def.schema.parse(['ok', 42]))
   assert.deepEqual(def.view(['x']), ['x'], 'rc 一代的 view 应为恒等')
+  // v2 状态形状（P1/P2 修复）：cd 标记项与触碰字符串混合；旧纯字符串状态仍然合法（迁移兼容）
+  assert.deepEqual(def.stateSchema.parse([{ cd: '/a' }, 'b']), [{ cd: '/a' }, 'b'])
+  assert.throws(() => def.stateSchema.parse([{ cd: 42 }]), 'cd 必须是字符串')
+  assert.throws(() => def.stateSchema.parse([{ cd: '' }]), 'cd 必须非空')
+  assert.throws(() => def.stateSchema.parse(['']), '空字符串不是合法触碰项')
+  // fold v2：working_directory 记为标记项；省略 cd（读目录模式）不动状态；逐出策略保 cd
+  const cdState = def.apply(st0, { type: 'tool/call', name: 'working_directory', arguments: { cd: '/somewhere' } })
+  assert.deepEqual(cdState, [{ cd: '/somewhere' }], 'working_directory 带 cd 记为标记项')
+  const cdRead = def.apply(cdState, { type: 'tool/call', name: 'working_directory', arguments: {} })
+  assert.ok(Object.is(cdState, cdRead), '省略 cd（读目录模式）返回同一引用')
+  let capped = cdState
+  for (let i = 0; i < 205; i++) capped = def.apply(capped, { type: 'tool/call', name: 'write', arguments: { file_path: `f${i}.ts` } })
+  assert.equal(capped.length, 200, '上限仍为 200')
+  assert.deepEqual(capped[0], { cd: '/somewhere' }, '逐出永不吞 cd 标记（否则后续相对触碰的回放游标就错了）')
+  assert.ok(capped.includes('f204.ts') && !capped.includes('f0.ts'), '溢出丢最旧的触碰项')
 })

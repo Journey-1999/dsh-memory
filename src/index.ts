@@ -929,37 +929,71 @@ const TOUCH_TOOL_ARGS: Record<string, string> = {
  * Plain-JSON validator for the touched-dirs state. The projection registry
  * erases schemas to `{ parse(value) }` (its ErasedDefinition) and calls it
  * only when seeding from the persisted cache — this is the zero-dependency
- * equivalent of `z.array(z.string())`.
+ * equivalent of `z.array(z.union([z.string(), z.object({ cd: z.string() })]))`.
+ * v2 items: a touch string, or a {cd} marker recording one working_directory
+ * hop. Pure-string states (the v1 shape) parse unchanged — that IS the
+ * one-time migration; persisted ver=1 rows are additionally discarded by the
+ * registry on the version bump and refolded from the session log.
  */
+const isTouchedDirsItem = (x: unknown): boolean =>
+  (typeof x === 'string' && x !== '')
+  || (typeof x === 'object' && x !== null && typeof (x as { cd?: unknown }).cd === 'string' && (x as { cd: string }).cd !== '')
+
 const touchedDirsSchema = {
-  parse(value: unknown): string[] {
-    if (!Array.isArray(value) || value.some(x => typeof x !== 'string')) throw new Error('touched-dirs state must be a string array')
+  parse(value: unknown): Array<string | { cd: string }> {
+    if (!Array.isArray(value) || !value.every(isTouchedDirsItem)) throw new Error('touched-dirs state must be (string | {cd})[]')
     return value
   },
 }
 
+/** The official working-directory tool: `cd` enters a directory (omitted = read
+ * the current one — verified against @deepseek-ai/dsh-tool-working-directory).
+ * Its calls become {cd} state markers so injection can replay each touch's
+ * historical cursor. */
+const CD_TOOL = 'working_directory'
+
 /**
- * Pure fold for TOUCHED_DIRS_KEY: `tool/call` events append their touched
- * location string RAW — a relative path stays unresolved until injection,
- * where the session's effective cwd is known (the reducer cannot know the
- * cwd at event time). Returns the SAME state reference when an event adds
- * nothing — the registry skips all downstream work on `Object.is`.
+ * Pure fold for TOUCHED_DIRS_KEY (v2, P1/P2 fix): touch tools append their
+ * argument RAW — a relative path cannot be resolved here (the fold sees no
+ * cwd), so working_directory calls are recorded as {cd} markers letting the
+ * injection side REPLAY the cursor each touch was made under. Resolving
+ * relatives against the assembly-time cwd instead would drop tags after a
+ * cd back (P1) and leak tags into never-touched areas after a cd forward
+ * (P2). Returns the SAME state reference when an event adds nothing — the
+ * registry skips all downstream work on `Object.is`.
  * The state rides the session event log (via sessionProjections), so it
  * survives session resume and clears for fresh sessions — exactly the
  * CLAUDE.md semantics we want.
  */
-function foldTouchedDirs(state: unknown, event: unknown): string[] {
-  const cur = state as string[]
+function foldTouchedDirs(state: unknown, event: unknown): Array<string | { cd: string }> {
+  const cur = state as Array<string | { cd: string }>
   const e = event as { type?: unknown, name?: unknown, arguments?: unknown } | undefined
   if (e === undefined || e.type !== 'tool/call') return cur
+  const args = e.arguments as Record<string, unknown> | null | undefined
+  const argOf = (name: string): unknown => args !== null && typeof args === 'object' ? (args as Record<string, unknown>)[name] : undefined
+  if (e.name === CD_TOOL) {
+    const cd = argOf('cd')
+    if (typeof cd !== 'string' || cd.trim() === '') return cur // read-mode call: the cursor does not move
+    return pushTouchedCapped(cur, { cd })
+  }
   const argName = typeof e.name === 'string' ? TOUCH_TOOL_ARGS[e.name] : undefined
   if (argName === undefined) return cur
-  const args = e.arguments as Record<string, unknown> | null | undefined
-  const raw = args !== null && typeof args === 'object' ? (args as Record<string, unknown>)[argName] : undefined
+  const raw = argOf(argName)
   if (typeof raw !== 'string' || raw.trim() === '') return cur
-  if (cur.includes(raw)) return cur
-  const next = [...cur, raw]
-  return next.length > TOUCHED_DIRS_CAP ? next.slice(next.length - TOUCHED_DIRS_CAP) : next
+  if (cur.includes(raw)) return cur // dedup keeps the FIRST occurrence — its cursor context is the one it was touched under
+  return pushTouchedCapped(cur, raw)
+}
+
+/** Append one item under the TOUCHED_DIRS_CAP. Eviction must NEVER take a {cd}
+ * marker — dropping one corrupts the replay cursor for every later relative
+ * touch — so the oldest touch (string) goes first; an all-marker state
+ * degrades to oldest-first. */
+function pushTouchedCapped(items: Array<string | { cd: string }>, item: string | { cd: string }): Array<string | { cd: string }> {
+  const next = [...items, item]
+  if (next.length <= TOUCHED_DIRS_CAP) return next
+  const victim = next.findIndex(x => typeof x === 'string')
+  next.splice(victim === -1 ? 0 : victim, 1)
+  return next
 }
 
 /**
@@ -979,7 +1013,7 @@ function registerTouchedDirsProjection(ctx: Context): void {
   try {
     projections.register({
       key: TOUCHED_DIRS_KEY,
-      stateVersion: 1,
+      stateVersion: 2, // v2: {cd} markers enable the touch-time cursor replay (P1/P2); ver=1 cache rows are discarded by the registry and refolded from the log
       stateSchema: touchedDirsSchema,
       schema: touchedDirsSchema,
       view: (state: unknown) => state,
@@ -998,7 +1032,7 @@ function registerTouchedDirsProjection(ctx: Context): void {
  * undefined whenever neither path works — touch activation silently
  * degrades to the cwd chain.
  */
-function readTouchedDirs(projections: unknown, session: unknown): string[] | undefined {
+function readTouchedDirs(projections: unknown, session: unknown): unknown[] | undefined {
   const p = projections as {
     stateOf?: (session: unknown, key: string) => unknown
     snapshot?: (session: unknown) => { values?: Record<string, unknown> }
@@ -1006,11 +1040,11 @@ function readTouchedDirs(projections: unknown, session: unknown): string[] | und
   try {
     if (typeof p?.stateOf === 'function') {
       const v = p.stateOf(session, TOUCHED_DIRS_KEY)
-      if (Array.isArray(v)) return v as string[]
+      if (Array.isArray(v)) return v
     }
     if (typeof p?.snapshot === 'function') {
       const v = p.snapshot(session)?.values?.[TOUCHED_DIRS_KEY]
-      if (Array.isArray(v)) return v as string[]
+      if (Array.isArray(v)) return v
     }
   } catch {
     // registry present but failing: degrade to cwd-only activation
@@ -1108,11 +1142,20 @@ function registerMemoryGuidance(ctx: Context): void {
           if (agentSession !== undefined) {
             const touched = readTouchedDirs((ctx as unknown as { get?: (name: string) => unknown }).get?.('sessionProjections'), agentSession)
             if (touched !== undefined) {
-              for (const raw of touched) {
-                if (typeof raw !== 'string' || raw.trim() === '') continue
-                // relative paths resolve against the session's effective cwd;
-                // directories outside this workspace's root activate nothing
-                const abs = path.isAbsolute(raw) ? raw : path.resolve(sessionCwd, raw)
+              // P1/P2 fix: each relative touch resolves against the cursor AT ITS
+              // TIME — start from the frozen creation cwd and advance through the
+              // recorded working_directory cd markers — never against the
+              // assembly-time cwd (that drops tags after a cd back, P1, and leaks
+              // tags into never-touched areas after a cd forward, P2).
+              let cursor = sessionCwdOfAgent(args?.agent) ?? sessionCwd
+              for (const item of touched) {
+                if (item !== null && typeof item === 'object') {
+                  const cd = (item as { cd?: unknown }).cd
+                  if (typeof cd === 'string' && cd.trim() !== '') cursor = path.isAbsolute(cd) ? cd : path.resolve(cursor, cd)
+                  continue
+                }
+                if (typeof item !== 'string' || item.trim() === '') continue
+                const abs = path.isAbsolute(item) ? item : path.resolve(cursor, item)
                 // fold stores raw argument paths: read/edit/write/grep(file) hand us a FILE,
                 // glob/grep(dir)/pwsh hand us a DIRECTORY. dirname alone strips the deepest
                 // tag level for directory-shaped args; raw alone adds one unreachable tag
