@@ -131,6 +131,23 @@ test('P2 串桶：backend 下触碰的 "src" 在 cd 到 frontend 后不得重解
   assert.ok(text.includes('Backend memory'), 'backend/src 的祖先标签 [backend] 应因触碰激活')
 })
 
+test('T10 跨光标同相对路径：cd 间隔的 "src" 各记一次（F6）', () => {
+  // 会话创建于 root：cd backend → grep 'src'（= backend/src）→ cd ../frontend → grep 'src'（= frontend/src）→ cd ..
+  const evs = [
+    { type: 'tool/call', name: 'working_directory', arguments: { cd: 'backend' } },
+    { type: 'tool/call', name: 'grep', arguments: { path: 'src' } },
+    { type: 'tool/call', name: 'working_directory', arguments: { cd: '../frontend' } },
+    { type: 'tool/call', name: 'grep', arguments: { path: 'src' } },
+    { type: 'tool/call', name: 'working_directory', arguments: { cd: '..' } },
+  ]
+  const st = touchedViaFold(evs)
+  assert.equal(st.filter(x => x === 'src').length, 2, '同一相对字符串在不同光标段各记一次（跨段不去重）')
+  const text = auto.text({ agent: agent(root, st) }) // 装配时有效 cwd 已回到 root，cwd 链不贡献标签
+  assert.ok(text.includes('Backend memory'), 'backend/src 的祖先标签 [backend] 应注入')
+  assert.ok(text.includes('Frontend area memory'), 'frontend/src 的祖先标签 [frontend] 应注入')
+  assert.ok(text.includes('Frontend src memory'), 'frontend/src 自身标签应注入')
+})
+
 test('T6 降级：宿主无 workingDirectory/sessionProjections → 回落 header.cwd 链式过滤', async () => {
   const sections2 = []
   const ctx2 = {

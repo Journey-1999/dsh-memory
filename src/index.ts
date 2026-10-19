@@ -990,7 +990,15 @@ function foldTouchedDirs(state: unknown, event: unknown): Array<string | { cd: s
   if (argName === undefined) return cur
   const raw = argOf(argName)
   if (typeof raw !== 'string' || raw.trim() === '') return cur
-  if (cur.includes(raw)) return cur // dedup keeps the FIRST occurrence — its cursor context is the one it was touched under
+  // F6: dedup only within the CURRENT cursor segment — the items after the
+  // last {cd} marker. Since 0.13.5 each relative touch replays against its
+  // touch-time cursor, so the same string in different segments is a
+  // DIFFERENT directory and must be recorded again; within one segment a
+  // repeat is the same directory and stays idempotent (same-reference return
+  // preserved for the Object.is contract).
+  let segmentStart = 0
+  for (let i = cur.length - 1; i >= 0; i--) if (typeof cur[i] === 'object') { segmentStart = i + 1; break }
+  if (cur.slice(segmentStart).includes(raw)) return cur
   return pushTouchedCapped(cur, raw)
 }
 
