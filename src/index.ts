@@ -377,15 +377,24 @@ async function recordWorkspace(): Promise<void> {
  * (authoritative, when the service exists) union the user-scope ledger
  * (self-contained fallback). Both best-effort; unknown shapes are skipped.
  */
-async function knownWorkspaces(ctx: Context): Promise<string[]> {
+async function knownWorkspaces(ctx: Context): Promise<{ roots: string[], titles: Map<string, string> }> {
   const roots = new Set<string>()
+  const titles = new Map<string, string>()
   try {
     const registry = (ctx as unknown as { get?: (name: string) => unknown }).get?.('workspaceRegistry') as { list(): Promise<unknown[]> } | undefined // A3: undeclared-inject property reads throw on lean fibers; ctx.get is the official inject-free read
     if (registry !== undefined && typeof registry.list === 'function') {
       for (const entry of await registry.list()) {
         const e = entry as Record<string, unknown>
         const raw = e.path ?? (typeof e.directory === 'function' ? String(e.directory()) : e.directory) // A4
-        if (typeof raw === 'string' && path.isAbsolute(raw)) roots.add(path.resolve(raw))
+        if (typeof raw === 'string' && path.isAbsolute(raw)) {
+          const resolved = path.resolve(raw)
+          roots.add(resolved)
+          // F5: the GUI renames a workspace's TITLE (the path never rewrites —
+          // host Workspace contract); the panel must display it, falling back
+          // to the basename for registry entries without a usable title and
+          // for ledger-only workspaces.
+          if (typeof e.title === 'string' && e.title.trim() !== '') titles.set(resolved, e.title.trim())
+        }
       }
     }
   } catch { /* best-effort */ }
@@ -395,7 +404,7 @@ async function knownWorkspaces(ctx: Context): Promise<string[]> {
       if (typeof w === 'string' && path.isAbsolute(w)) roots.add(path.resolve(w))
     }
   } catch { /* absent → skip */ }
-  return [...roots]
+  return { roots: [...roots], titles }
 }
 
 /**
@@ -451,7 +460,7 @@ async function resolvePanelBase(ctx: Context, body: Record<string, unknown>, rep
   if (body.scope === 'project') {
     if (body.workspace !== undefined) {
       const root = path.resolve(String(body.workspace))
-      if (!(await knownWorkspaces(ctx)).includes(root)) { reply(400, { ok: false, error: 'unknown workspace' }); return undefined }
+      if (!(await knownWorkspaces(ctx)).roots.includes(root)) { reply(400, { ok: false, error: 'unknown workspace' }); return undefined }
       return path.join(root, '.dsh', 'memory')
     }
     if (PROJECT_DIR === undefined) { reply(400, { ok: false, error: 'target scope unavailable' }); return undefined }
@@ -789,7 +798,8 @@ async function buildPanelPayload(ctx: Context): Promise<Record<string, unknown>>
   }
   const currentRoot = PROJECT_DIR === undefined ? undefined : path.resolve(PROJECT_DIR, '..', '..')
   const workspaces = await knownWorkspaces(ctx)
-  const ordered = currentRoot !== undefined ? [currentRoot, ...workspaces.filter(w => w !== currentRoot)] : workspaces
+  const { roots, titles } = workspaces
+  const ordered = currentRoot !== undefined ? [currentRoot, ...roots.filter(w => w !== currentRoot)] : roots
   const seen = new Set<string>()
   const projects: Array<Record<string, unknown>> = []
   for (const root of ordered) {
@@ -801,7 +811,7 @@ async function buildPanelPayload(ctx: Context): Promise<Record<string, unknown>>
     if (!existsSync(root)) continue
     const base = path.join(root, '.dsh', 'memory')
     const s = scopeStats(base) // no .dsh/memory yet → all-zero stats + empty entries
-    projects.push({ root, name: path.basename(root) || root, serviceAnchor: root === currentRoot, stats: s.stats, entries: s.entries })
+    projects.push({ root, name: titles.get(root) ?? (path.basename(root) || root), serviceAnchor: root === currentRoot, stats: s.stats, entries: s.entries })
   }
   // nested scopes: a sub-folder .dsh/memory may be discoverable from several
   // roots (e.g. the cwd-fallback current root and its real parent workspace);

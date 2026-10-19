@@ -196,7 +196,11 @@ window.__ModuleLoader__.load({
 				placeholder: "Search memories…",
 				value: query,
 				onChange: (e) => setQuery(e.target.value)
-			})), (0, react.createElement)("div", { style: S.scroller }, (0, react.createElement)(UserSection, {
+			}), (0, react.createElement)("button", {
+				style: S.smallButton,
+				title: "刷新（工作区改名后同步显示）",
+				onClick: fetchList
+			}, "⟳")), (0, react.createElement)("div", { style: S.scroller }, (0, react.createElement)(UserSection, {
 				info: data.scopes.user,
 				query: q,
 				onSaved: fetchList

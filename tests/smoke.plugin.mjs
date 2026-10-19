@@ -455,3 +455,28 @@ test('v0.12.0 A1：跨站来源被 403 拒绝，同源放行', async () => {
     { writeHead: s => { status2 = s }, end: s => { body2 = s } })
   assert.equal(status2, 200, '同源应放行')
 })
+
+test('F5 面板工作区名跟随宿主 title（GUI 改名后同步）', async () => {
+  const wsA = path.join(tmp, 'f5-alpha'), wsB = path.join(tmp, 'f5-beta')
+  for (const w of [wsA, wsB]) await fs.mkdir(path.join(w, '.dsh', 'memory', 'memories'), { recursive: true })
+  const routes = []
+  const ctx5 = {
+    tools: { register: () => {} },
+    systemPrompt: { section: () => {}, getSectionOrder: () => 42 },
+    inject: (names, cb) => { if (names.includes('webServer')) cb({ webServer: { register: r => { routes.push(r); return () => {} } } }) },
+    get: name => name === 'workspaceRegistry'
+      ? { list: async () => [{ path: wsA, title: '我改过名的工作区' }, { path: wsB, title: '' }] }
+      : undefined,
+  }
+  await plugin.apply(ctx5)
+  const route = routes.find(r => r.path === '/dsh-memory/api/v1/list')
+  assert.ok(route, '路由应已注册')
+  let body = ''
+  await route.handler({ method: 'GET', headers: {} }, { writeHead: () => {}, end: s => { body = s } })
+  const data = JSON.parse(body)
+  const a = (data.scopes.projects ?? []).find(x => x.root === path.resolve(wsA))
+  const b = (data.scopes.projects ?? []).find(x => x.root === path.resolve(wsB))
+  assert.ok(a && b, '两个工作区都应在列表中')
+  assert.equal(a.name, '我改过名的工作区', '改名后 name 应跟随宿主 title（F5）')
+  assert.equal(b.name, 'f5-beta', 'title 缺失/为空 → 回落目录名')
+})

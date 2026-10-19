@@ -133,6 +133,7 @@ function MemoryPanel(): ReactElement {
         value: query,
         onChange: (e: ChangeEvent<HTMLInputElement>) => setQuery(e.target.value),
       }),
+      h('button', { style: S.smallButton, title: '刷新（工作区改名后同步显示）', onClick: fetchList }, '⟳'),
     ),
     h('div', { style: S.scroller },
       h(UserSection, {
