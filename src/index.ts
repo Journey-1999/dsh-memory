@@ -677,10 +677,10 @@ function excerpt(text: string, query: string, radius = 60): string {
 }
 
 const SAVE_DESCRIPTION = [
-  'Save a durable memory that persists across sessions. Proactively call this whenever the conversation reveals information worth remembering long-term:',
-  "the user's preferences, working habits, or corrections; project decisions and their rationale; key facts, numbers, or IDs; task outcomes and lessons learned.",
-  'Scope rule: personal cross-project preferences go to scope "user"; project decisions and conventions go to scope "project" (team-shared, committed to git).',
-  'Write rules: (1) strong-evidence default — before saving, ask "will this still matter a month from now?"; if unsure, skip it, memory noise costs more than memory gaps; (2) dedupe-and-update — saving a topic that already exists updates that memory in place instead of appending a duplicate; (3) never save secrets — if the content contains credentials, tokens, or passwords, refuse to save and tell the user to keep secrets out of chat.',
+  'Save a durable memory that persists across sessions. Default bar: would this still matter a month from now? If unsure, skip it or ask the user first — memory noise costs more than memory gaps.',
+  'SAVE: durable user preferences, habits, corrections; project decisions AND their rationale; conventions that outlive the task; lessons from a CONCLUDED investigation.',
+  'DO NOT save: mid-investigation progress or state that will change ("currently broken/unfixed" is not a memory — save the conclusion once the task settles); anything derivable from the repo or git history; one-off task details; secrets (refuse and say so).',
+  'Rules: (1) save at conclusions, never while still working; (2) one topic = one memory — the same feature/bug/investigation stays one entry; the dated index lines in your prompt show what already exists: check them and update in place instead of near-duplicating; (3) a session typically ends with zero to two new or updated memories; (4) scope: personal cross-project preferences → "user"; project decisions → "project" (team-shared, committed to git).',
 ].join(' ')
 
 const SEARCH_DESCRIPTION = 'Search saved memories by keyword (case-insensitive substring match across titles, tags, and content). Call this when prior context, user preferences, or earlier decisions may be relevant to the current task — before re-asking the user.'
@@ -1220,7 +1220,9 @@ function registerMemoryGuidance(ctx: Context): void {
         + sections.join('\n\n')
         + '\n\nUse memory_search / memory_read when prior context, user preferences, or earlier decisions may matter — before re-asking the user. '
         + 'Memory is not proof of current behavior — for consequential claims, inspect the actual owning source. '
-        + 'Proactively memory_save important new facts as they appear: personal preferences → scope "user"; project decisions/conventions → scope "project". Write rules: ask "will this still matter a month from now?" before saving (skip if unsure — noise costs more than gaps); same-topic saves update the existing memory in place; dated index lines show what is fresh. Never save secrets or transient details.'
+        + 'memory_save only month-scale facts, at conclusions — never mid-progress state ("currently broken" is not a memory): preferences → "user"; project decisions/conventions → "project". '
+        + 'The dated lines above show what already exists — the same feature/bug/investigation is one topic: update it in place instead of near-duplicating. '
+        + 'Unsure whether durable → skip or ask the user; noise costs more than gaps. Never secrets or transient details.'
     },
   })
 }

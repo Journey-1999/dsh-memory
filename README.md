@@ -92,11 +92,11 @@ Say *"Remember that I prefer pnpm over npm."* → a `memory_save` call appears. 
 | `memory_read` | Read one full memory — Claude Code's `project_memory_read` field contract (`content?`, `local_file?`, `size_bytes`, `updated_at`, `truncated`) |
 | `memory_list` | Recent memories per scope, newest first |
 
-Tool descriptions embed proactive-save guidance — preferences, decisions and key facts get saved without being asked; secrets never do.
+Tool descriptions embed a save gate modeled on Claude Code / Codex — month-scale facts only, saved at conclusions (never mid-progress state); borderline cases ask the user; secrets never save.
 
 **Write rules (ported from Claude Code / Gemini CLI practice):**
-- **Strong-evidence gate** — before saving, the model asks *"will this still matter a month from now?"*; unsure → skip (noise costs more than gaps)
-- **Dedupe-and-update** — same-topic saves update the memory in place instead of appending duplicates
+- **Strong-evidence gate** — before saving, the model asks *"will this still matter a month from now?"*; unsure → skip or ask the user (noise costs more than gaps)
+- **Dedupe-and-update** — one topic (the same feature/bug/investigation) is one memory: the injected dated index shows what exists, and same-topic saves update it in place instead of near-duplicating
 - **Dated index lines** — every entry carries `YYYY-MM-DD`, so the model reasons fresh-vs-stale at injection time
 - **Secret refusal** — credentials/tokens/passwords are refused out loud, on every write path
 
@@ -232,11 +232,11 @@ pnpm dsh plugin --profile web add @fooxe/dsh-memory   # 源码检出方式
 | `memory_read` | 完整读取——字段与 Claude Code 官方 `project_memory_read` 一致（`content?`、`local_file?`、`size_bytes`、`updated_at`、`truncated`） |
 | `memory_list` | 双域最近记忆列表（新→旧） |
 
-工具描述内置主动保存指引——偏好、决策、关键数字不用吩咐就存，密钥永不存。
+工具描述内置保存门槛（参照 Claude Code / Codex）——只存月度级稳定事实、结论时刻保存（过程状态不存）、拿不准先问用户；密钥永不存。
 
 **写入规则（移植自 Claude Code / Gemini CLI 实践）：**
-- **强证据门槛**——存前自问"一个月后还有用吗？"，不确定就跳过（噪音比缺口更贵）
-- **去重更新**——同主题再存 → 原地更新（内容替换、时间戳刷新），不追加重复
+- **强证据门槛**——存前自问“一个月后还有用吗？”，不确定就跳过或先问用户（噪音比缺口更贵）
+- **同主题原地更新**——一个主题（同一功能/缺陷/调查）只留一条记忆：注入的带日期索引就是现存清单，同主题保存原地更新而非近似复制
 - **日期索引**——每条带 YYYY-MM-DD，注入时模型可推理新旧
 - **密钥拒存**——凭据/令牌/密码一律拒绝并明说，覆盖所有写入路径
 

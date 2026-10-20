@@ -480,3 +480,11 @@ test('F5 面板工作区名跟随宿主 title（GUI 改名后同步）', async (
   assert.equal(a.name, '我改过名的工作区', '改名后 name 应跟随宿主 title（F5）')
   assert.equal(b.name, 'f5-beta', 'title 缺失/为空 → 回落目录名')
 })
+
+test('0.13.9 保存门槛措辞：结论时刻/单主题/问用户三个关键句在场', () => {
+  const text = sections[0].text({})
+  assert.ok(text.includes('memory_save only month-scale facts, at conclusions'), '结论时刻触发必须在场')
+  assert.ok(text.includes('update it in place instead of near-duplicating'), '单主题原地更新必须在场')
+  assert.ok(text.includes('skip or ask the user'), '边界问用户必须在场')
+  assert.ok(text.includes('Memory is not proof of current behavior'), '0.13.6 的 not-proof 句必须保留')
+})
