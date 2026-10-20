@@ -99,6 +99,7 @@ Tool descriptions embed a save gate modeled on Claude Code / Codex — month-sca
 - **Dedupe-and-update** — one topic (the same feature/bug/investigation) is one memory: the injected dated index shows what exists, and same-topic saves update it in place instead of near-duplicating
 - **Dated index lines** — every entry carries `YYYY-MM-DD`, so the model reasons fresh-vs-stale at injection time
 - **Secret refusal** — credentials/tokens/passwords are refused out loud, on every write path
+- **Instruction-style content** — entries are imperatives for a future agent (2-5 self-contained sentences); the title is a short directive; index lines carry at most 3 tags
 
 ## When · what · which scope
 
@@ -239,6 +240,7 @@ pnpm dsh plugin --profile web add @fooxe/dsh-memory   # 源码检出方式
 - **同主题原地更新**——一个主题（同一功能/缺陷/调查）只留一条记忆：注入的带日期索引就是现存清单，同主题保存原地更新而非近似复制
 - **日期索引**——每条带 YYYY-MM-DD，注入时模型可推理新旧
 - **密钥拒存**——凭据/令牌/密码一律拒绝并明说，覆盖所有写入路径
+- **指令式内容**——记忆是写给未来 agent 的祈使句（2-5 句自包含）；标题=短指令；索引行标签至多 3 个
 
 ## 何时记 · 记什么 · 记哪级
 

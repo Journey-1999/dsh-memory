@@ -338,7 +338,7 @@ async function saveMemoryCore(input: SaveCoreInput): Promise<SaveCoreResult> {
     }
     const header = `---\nid: ${id}\nscope: ${scope}\npath: ${memPath}\nsaved_at: ${now.toISOString()}\ntags: ${tags.join(', ')}\n---\n\n# ${title}\n\n`
     await atomicWriteFile(file, header + content + '\n')
-    const tagSuffix = tags.length ? ` \`${tags.join('` `')}\`` : ''
+    const tagSuffix = tags.length ? ` \`${tags.slice(0, 3).join('` `')}\`` : '' // index line caps at 3 tags — it injects every turn; full tags stay in frontmatter for search
     const pathTag = memPath !== '' ? ` [${memPath}]` : ''
     const indexLine = `- [${indexSafe(title)}](memories/${id}.md) — ${indexSafe(safeSlice(content.split('\n')[0] ?? '', 80))} (${date})${pathTag}${tagSuffix}`
     const lines = (await readIndex(base)).filter(l => !l.includes(`(memories/${id}.md)`))
@@ -554,7 +554,7 @@ async function handlePanelUpdate(ctx: Context, request: IncomingMessage, respons
     const date = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`
     const header = `---\nid: ${rawId}\nscope: ${oldScope}\npath: ${oldPath}\nsaved_at: ${now.toISOString()}\ntags: ${newTags.join(', ')}\n---\n\n# ${newTitle}\n\n`
     await atomicWriteFile(file, header + newContent + '\n')
-    const tagSuffix = newTags.length ? ` \`${newTags.join('` `')}\`` : ''
+    const tagSuffix = newTags.length ? ` \`${newTags.slice(0, 3).join('` `')}\`` : ''
     const pathTag = oldPath !== '' ? ` [${oldPath}]` : ''
     const indexLine = `- [${indexSafe(newTitle)}](memories/${rawId}.md) — ${indexSafe(safeSlice(newContent.split('\n')[0] ?? '', 80))} (${date})${pathTag}${tagSuffix}`
     const lines = (await readIndex(base)).filter(l => !l.includes(`(memories/${rawId}.md)`))
@@ -680,6 +680,7 @@ const SAVE_DESCRIPTION = [
   'Save a durable memory that persists across sessions. Default bar: would this still matter a month from now? If unsure, skip it or ask the user first — memory noise costs more than memory gaps.',
   'SAVE: durable user preferences, habits, corrections; project decisions AND their rationale; conventions that outlive the task; lessons from a CONCLUDED investigation.',
   'DO NOT save: mid-investigation progress or state that will change ("currently broken/unfixed" is not a memory — save the conclusion once the task settles); anything derivable from the repo or git history; one-off task details; secrets (refuse and say so).',
+  'Write style: an entry is an INSTRUCTION for a future agent, not a report — imperative and self-contained in 2-5 sentences ("use X; never Y because Z"); the title is a short directive, not a full sentence (the title becomes the injected index line — a sentence-length title wastes every future prompt); at most 3 tags — memory_search matches content, not tag count.',
   'Rules: (1) save at conclusions, never while still working; (2) one topic = one memory — the same feature/bug/investigation stays one entry; the dated index lines in your prompt show what already exists: check them and update in place instead of near-duplicating; (3) a session typically ends with zero to two new or updated memories; (4) scope: personal cross-project preferences → "user"; project decisions → "project" (team-shared, committed to git).',
 ].join(' ')
 

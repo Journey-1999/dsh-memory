@@ -488,3 +488,25 @@ test('0.13.9 保存门槛措辞：结论时刻/单主题/问用户三个关键�
   assert.ok(text.includes('skip or ask the user'), '边界问用户必须在场')
   assert.ok(text.includes('Memory is not proof of current behavior'), '0.13.6 的 not-proof 句必须保留')
 })
+
+test('0.13.10 索引行标签 ≤3：frontmatter 全量保留，检索仍命中', async () => {
+  const r = await tool('memory_save').execute(
+    { title: 'Tag cap probe', content: 'Index line tags cap at three.', tags: ['t1', 't2', 't3', 't4', 't5'] }, exec)
+  assert.ok(r.saved || r.updated, `应保存成功: ${JSON.stringify(r)}`)
+  const idx = await fs.readFile(path.join(tmp, '.dsh', 'memory', 'MEMORY.md'), 'utf8')
+  const line = idx.split('\n').find(l => l.includes('Tag cap probe'))
+  assert.ok(line, '索引行应在场')
+  assert.ok(line.includes('`t1`') && line.includes('`t3`'), '前 3 个标签在索引行')
+  assert.ok(!line.includes('`t4`') && !line.includes('`t5`'), '第 4+ 个标签不得进索引行（每轮注入成本）')
+  const file = await fs.readFile(path.join(tmp, '.dsh', 'memory', 'memories', `${r.id}.md`), 'utf8')
+  assert.ok(/tags: t1, t2, t3, t4, t5/.test(file), 'frontmatter 应保留全部 5 个标签（检索命中面）')
+  const found = await tool('memory_search').execute({ query: 't5' }, exec)
+  assert.ok(found.matches?.some(m => m.id === r.id), '第 5 个标签仍应可经内容检索命中')
+})
+
+test('0.13.10 内容风格措辞：指令体/短标题/标签纪律在工具描述在场', () => {
+  const desc = String(tool('memory_save').description)
+  assert.ok(desc.includes('INSTRUCTION for a future agent'), '指令式风格必须在场')
+  assert.ok(desc.includes('the title is a short directive'), '短标题规则必须在场')
+  assert.ok(desc.includes('at most 3 tags'), '标签纪律必须在场')
+})
